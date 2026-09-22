@@ -1,0 +1,10 @@
+# data and outputs are not part of the repository
+images/
+images_student/
+results*/
+archive/
+*.zip
+*.pptx
+*_log.txt
+HANDOFF.md
+__pycache__/
