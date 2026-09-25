@@ -54,9 +54,19 @@ Python 3.10 with `opencv-python` (tested 5.0), `numpy` (2.2), `scipy` (1.15),
     pip install -r requirements.txt
 
 ## Usage
-File names must contain `_H{layers}_W{printer px}` and optionally `_{replicate}`
-(e.g. `device_H10_W100_2.jpg`), or the folder must hold a `manifest.csv`
-(written by `extract_pptx_images.py`).
+File names must contain `_H<layers>_W<printer px>`, or the folder must hold a
+`manifest.csv` (written by `extract_pptx_images.py`).
+
+A printability device carries ten channels with roof (membrane) thickness
+ML1 to ML10; wide designs need several overlapping frames. Name each frame
+`..._R<replicate>_top_H<layers>_W<px>_ML<a>-<b>.jpg`, where `ML<a>-<b>` lists
+the channels of that frame from left to right (`ML10-7` = ML10, 9, 8, 7). With
+such names the program assigns an ML value to every channel, keeps one
+observation per physical channel where frames overlap (the one farthest from the
+frame edge), and writes `summary_by_H_W_ML.csv` and `channel_state_map_W_ML.png`
+(a width x ML map per height). Frames whose detected channel count cannot be
+matched to the ML range are flagged in `ml_note` and left out of the map.
+`check_renamed_set.py` compares a renamed batch with the images already present.
 
     python topview_channel_pipeline.py --images examples --out results_examples
     python topview_channel_pipeline.py --images my_images --out results --only W100 --bar-mm 2.0 --pixel-um 32
