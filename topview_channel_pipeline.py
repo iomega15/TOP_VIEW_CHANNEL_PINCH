@@ -1167,16 +1167,170 @@ def write_csv(path, rows):
         wr.writerows(rows)
 
 
+def parse_frame(fn):
+    """Replicate and membrane-layer range from `..._R1_top_H10_W70_ML7-10.jpg`.
+
+    A printability device carries ten channels with roof thickness ML1..ML10; a wide design needs
+    several overlapping frames, and `ML<a>-<b>` lists the channels of one frame from left to right
+    (ML10-7 = ML10, 9, 8, 7). Returns (R, a, b), with None for anything the name does not carry.
+    """
+    base = os.path.basename(fn)
+    r = re.search(r"_R(\d+)_", base)
+    m = re.search(r"_ML(\d+)-(\d+)", base)
+    return (int(r.group(1)) if r else None,
+            int(m.group(1)) if m else None, int(m.group(2)) if m else None)
+
+
+def assign_ml(rows):
+    """Give every channel row its membrane-layer value and pick one observation per physical channel.
+
+    Per frame, the n detected channels (left to right) are matched to the k = |a-b|+1 channels the
+    file name lists:
+      n == k  one to one;
+      n >  k  the extra channels are partial ones at the frame edge: drop the channel nearest to an
+              edge until n == k (ml_note 'edge channel outside ML range');
+      n <  k  place the channels on the lattice with the measured pitch; if they then span exactly k
+              slots the missing one is interior and the assignment is unambiguous, otherwise the
+              frame is flagged ('fewer channels than ML range') and gets no ML values.
+    Overlapping frames image the same channel twice: among rows with the same (H, W, R, ML) the one
+    from a non-LOW device, with channel_confidence not LOW, farthest from the frame edge is kept
+    (ml_use = True); the others are kept in the CSV with ml_use = False.
+    """
+    by_file = {}
+    for r in rows:
+        if r.get("channel") and r.get("cls") in CLASS_ORDER:
+            by_file.setdefault(r["file"], []).append(r)
+    for fn, chans in by_file.items():
+        R, a, b = parse_frame(fn)
+        for r in chans:
+            r.update(R=R if R is not None else "", ML="", ml_note="", ml_use=False)
+        if a is None:
+            for r in chans:
+                r["ml_note"] = "no ML range in file name"
+            continue
+        step = 1 if b >= a else -1
+        mls = list(range(a, b + step, step))
+        k = len(mls)
+        chans = sorted(chans, key=lambda r: float(r["x_frac"]))
+        edge = lambda r: min(float(r["x_frac"]), 1 - float(r["x_frac"]))
+        keep = list(chans)
+        while len(keep) > k:
+            out = min((keep[0], keep[-1]), key=edge)
+            out["ml_note"] = "edge channel outside ML range"
+            keep.remove(out)
+        if len(keep) == k:
+            for r, ml in zip(keep, mls):
+                r["ML"] = ml
+            continue
+        pitch = float(chans[0].get("pitch_px") or 0)
+        wdev = float(chans[0].get("device_w_px") or 0)
+        slots = [round((float(r["x_frac"]) - float(keep[0]["x_frac"])) * wdev / pitch) if pitch else None
+                 for r in keep]
+        if pitch and slots[-1] == k - 1 and len(set(slots)) == len(slots):
+            for r, s in zip(keep, slots):
+                r["ML"] = mls[s]
+        else:
+            for r in keep:
+                r["ml_note"] = "fewer channels than ML range"
+
+    best = {}
+    for r in rows:
+        if r.get("ML") in ("", None):
+            continue
+        key = (r["H_layers"], r["W_px"], r["R"], r["ML"])
+        score = (r.get("device_confidence") != "LOW", r.get("channel_confidence") != "LOW",
+                 min(float(r["x_frac"]), 1 - float(r["x_frac"])))
+        if key not in best or score > best[key][0]:
+            best[key] = (score, r)
+    for score, r in best.values():
+        r["ml_use"] = True
+    return rows
+
+
+CLASS_LETTER = dict(FORMED="F", NECKED="N", PINCHED="P", NOT_FORMED="X", UNRESOLVED="U")
+
+
+def plot_ml_map(cells, out_png, widths=None):
+    """Categorical W x ML map per H: one cell per physical channel (replicates, if any, by majority).
+    widths: {H: [W, ...]} of every imaged design, so a design with no assignable channel still gets a
+    gray column instead of disappearing."""
+    Hs = sorted({c["H_layers"] for c in cells} | set(widths or {}))
+    if not Hs:
+        return
+    fig, axes = plt.subplots(len(Hs), 1, figsize=(12, 3.6 * len(Hs)), squeeze=False)
+    for ax, Hl in zip(axes[:, 0], Hs):
+        sub = [c for c in cells if c["H_layers"] == Hl]
+        Ws = sorted({c["W_px"] for c in sub} | set((widths or {}).get(Hl, [])))
+        for x in range(len(Ws)):
+            for y in range(10):
+                ax.add_patch(plt.Rectangle((x - 0.5, y - 0.5), 1, 1, facecolor="#f2f2f2", edgecolor="white", lw=1.5))
+        for c in sub:
+            x, y = Ws.index(c["W_px"]), c["ML"] - 1
+            color = "#d9d9d9" if c["excluded"] else CLASS_COLOR[c["cls"]]
+            ax.add_patch(plt.Rectangle((x - 0.5, y - 0.5), 1, 1, facecolor=color, edgecolor="white", lw=1.5))
+            txt = "–" if c["excluded"] else CLASS_LETTER[c["cls"]] + ("*" if c["touchdown"] else "")
+            ax.text(x, y, txt, ha="center", va="center", fontsize=7,
+                    color="black" if c["excluded"] or c["cls"] in ("NECKED", "UNRESOLVED") else "white")
+        ax.set_xlim(-0.5, len(Ws) - 0.5)
+        ax.set_ylim(-0.5, 9.5)
+        ax.set_xticks(range(len(Ws)))
+        ax.set_xticklabels([str(w) for w in Ws], fontsize=7)
+        ax.set_yticks(range(10))
+        ax.set_yticklabels([str(i + 1) for i in range(10)], fontsize=7)
+        ax.set_xlabel("design channel width W (printer px, 1 px = 32 um)")
+        ax.set_ylabel("roof thickness ML (layers)")
+        ax.set_title(f"H = {Hl} layers", loc="left", fontsize=9)
+        ax.set_aspect("auto")
+    handles = [plt.Rectangle((0, 0), 1, 1, color=CLASS_COLOR[c]) for c in CLASS_ORDER]
+    handles += [plt.Rectangle((0, 0), 1, 1, color="#d9d9d9"), plt.Rectangle((0, 0), 1, 1, color="#f2f2f2", ec="#bbbbbb")]
+    labels = ([f"{CLASS_LETTER[c]} {c.replace('_', ' ').lower()}" for c in CLASS_ORDER]
+              + ["– low-confidence device", "no channel assigned"])
+    fig.legend(handles, labels, loc="upper center", ncol=7, fontsize=7, frameon=False)
+    fig.text(0.99, 0.005, "* touchdown (roof on the floor inside an open channel)", ha="right", fontsize=7)
+    fig.tight_layout(rect=(0, 0.02, 1, 0.95))
+    fig.savefig(out_png, dpi=150)
+    plt.close(fig)
+
+
 def summarize(rows, out_dir):
-    """Per-device and per-(H, W) summaries + a class-fraction plot."""
+    """Per-frame and per-(H, W) summaries + a class-fraction plot; with ML-named files also a
+    per-(H, W, ML) table and a W x ML map in which every physical channel is counted once."""
     chan = [r for r in rows if r.get("channel", 0) and r.get("cls") in CLASS_ORDER
             and r.get("device_confidence") != "LOW"]
     if not chan:
         return
+    ml_mode = any(r.get("ML") not in ("", None) for r in rows)
     by_dev, by_hw = {}, {}
     for r in chan:
         by_dev.setdefault(r["file"], []).append(r)
-        by_hw.setdefault((r["H_layers"], r["W_px"]), []).append(r)
+        # pooled per-width statistics: with ML-named frames, only the kept observation of each channel
+        if not ml_mode or r.get("ml_use") in (True, "True"):
+            by_hw.setdefault((r["H_layers"], r["W_px"]), []).append(r)
+
+    if ml_mode:
+        groups = {}
+        for r in rows:
+            if r.get("ml_use") in (True, "True"):
+                groups.setdefault((int(r["H_layers"]), int(r["W_px"]), int(r["ML"])), []).append(r)
+        cells, ml_rows = [], []
+        for (Hl, Wd, ml), items in sorted(groups.items()):
+            good = [r for r in items if r.get("device_confidence") != "LOW"]
+            use = good or items
+            cls = max(CLASS_ORDER, key=lambda c: (sum(r["cls"] == c for r in use), -CLASS_ORDER.index(c)))
+            td = any(r["touchdown"] in (True, "True") for r in use)
+            cells.append(dict(H_layers=Hl, W_px=Wd, ML=ml, cls=cls, touchdown=td, excluded=not good))
+            one = use[0]
+            ml_rows.append(dict(H_layers=Hl, W_px=Wd, ML=ml, n_replicates=len(use), cls=cls,
+                                excluded_low_confidence=not good, touchdown=td,
+                                w_min_frac=one.get("w_min_frac", ""), closed_len_frac=one.get("closed_len_frac", ""),
+                                necked_len_frac=one.get("necked_len_frac", ""), file=one["file"],
+                                channel=one["channel"]))
+        write_csv(os.path.join(out_dir, "summary_by_H_W_ML.csv"), ml_rows)
+        widths = {}
+        for r in rows:
+            if r.get("H_layers") not in ("", None) and r.get("W_px") not in ("", None):
+                widths.setdefault(int(r["H_layers"]), set()).add(int(r["W_px"]))
+        plot_ml_map(cells, os.path.join(out_dir, "channel_state_map_W_ML.png"), widths)
 
     def agg(items):
         n = len(items)
@@ -1200,7 +1354,9 @@ def summarize(rows, out_dir):
     write_csv(os.path.join(out_dir, "device_summary.csv"), dev_rows)
     hw_rows = []
     for (Hl, Wd), items in sorted(by_hw.items(), key=lambda kv: (int(kv[0][0] or 0), int(kv[0][1] or 0))):
-        d = dict(H_layers=Hl, W_px=Wd, n_devices=len({r["file"] for r in items}))
+        # a device is one replicate R when the names carry it; otherwise each frame counts as one
+        d = dict(H_layers=Hl, W_px=Wd, n_devices=len({r.get("R") or r["file"] for r in items}),
+                 n_frames=len({r["file"] for r in items}))
         d.update(agg(items))
         hw_rows.append(d)
     write_csv(os.path.join(out_dir, "summary_by_H_W.csv"), hw_rows)
@@ -1295,6 +1451,7 @@ def main():
         rows = old + rows
         rows.sort(key=lambda r: (r["file"], r.get("channel", 0)))
     if rows:
+        assign_ml(rows)
         write_csv(csv_path, rows)
         summarize(rows, args.out)
         print(f"\nwrote {args.out}/channel_results.csv ({len(rows)} rows), device_summary.csv, summary_by_H_W.csv")
