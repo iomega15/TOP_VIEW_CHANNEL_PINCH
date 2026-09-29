@@ -792,6 +792,55 @@ def nanmedfilt(x, win):
     return out
 
 
+def measure_halves(w_cls, closed, h, reach, edge):
+    """Width of the two lumen halves along the channel and the gap between their tips.
+
+    Open rows are rows with a tracked width above the closed threshold. The top half is the open
+    run that starts at the top face, the bottom half the run that ends at the bottom face (a
+    continuous channel is split at mid-length). Per half, after skipping the port flare (`edge`
+    rows): w_base = median width of the outer 20% (port end), w_inner = median of the innermost
+    10% (tip or mid-length), taper = w_inner / w_base, narrowing = -d(width)/d(distance from the
+    port) from a linear fit (px per px; positive = gets thinner toward the middle). tip_gap_frac =
+    distance between the two inner tips as a fraction of the length (0 for a continuous channel;
+    a missing half counts from the opposite face)."""
+    ok = ~np.isnan(w_cls) & ~closed
+    runs = runs_of(ok)
+    top = next(((a, b) for a, b in runs if a <= reach), None)
+    bot = next(((a, b) for a, b in reversed(runs) if b >= h - reach), None)
+    if top and bot and top == bot:                      # continuous channel: split at mid-length
+        a, b = top
+        top, bot = (a, (a + b) // 2), ((a + b) // 2, b)
+    out = dict(tip_gap_frac=np.nan, open_top_len_frac=0.0, open_bot_len_frac=0.0)
+
+    def half(run, from_top):
+        a, b = run
+        a2, b2 = (max(a, edge), b) if from_top else (a, min(b, h - edge))
+        if b2 - a2 < 6:
+            return dict(w_base=np.nan, w_inner=np.nan, taper=np.nan, narrowing=np.nan)
+        w = w_cls[a2:b2]
+        if not from_top:
+            w = w[::-1]                                  # index 0 = port end
+        n = len(w)
+        good = ~np.isnan(w)
+        base = float(np.nanmedian(w[: max(3, n // 5)]))
+        inner = float(np.nanmedian(w[-max(3, n // 10):]))
+        slope = float(np.polyfit(np.arange(n)[good], w[good], 1)[0]) if good.sum() >= 6 else np.nan
+        return dict(w_base=base, w_inner=inner, taper=inner / base if base > 0 else np.nan, narrowing=-slope)
+
+    if top:
+        out.update({f"{k}_top": v for k, v in half(top, True).items()})
+        out["open_top_len_frac"] = (top[1] - top[0]) / h
+    if bot:
+        out.update({f"{k}_bot": v for k, v in half(bot, False).items()})
+        out["open_bot_len_frac"] = (bot[1] - bot[0]) / h
+    if top or bot:
+        out["tip_gap_frac"] = max(0, (bot[0] if bot else h) - (top[1] if top else 0)) / h
+    for k in ("w_base_top", "w_inner_top", "taper_top", "narrowing_top",
+              "w_base_bot", "w_inner_bot", "taper_bot", "narrowing_bot"):
+        out.setdefault(k, np.nan)
+    return out
+
+
 def classify_channel(tr, h, w_ref, arc, w_exp, blob=None, R_full=None):
     present = tr["present"].copy()
     width = tr["width"].copy()
@@ -901,6 +950,7 @@ def classify_channel(tr, h, w_ref, arc, w_exp, blob=None, R_full=None):
     n_core = max(1, int(core.sum()))
     closed_len_frac = float(closed.sum()) / n_core
     necked_len_frac = float(necked.sum()) / n_core
+    halves = measure_halves(w_cls, closed, h, reach, int(P["edge_exclude"] * h))
 
     def run_center(mask):
         rr = runs_of(mask)
@@ -936,7 +986,7 @@ def classify_channel(tr, h, w_ref, arc, w_exp, blob=None, R_full=None):
     return dict(cls=cls, w_cls=w_cls, f_present=f_present, reaches_top=reaches_top, reaches_bot=reaches_bot,
                 w_min=w_min, w_min_frac=w_min_frac, w_min_y=w_min_y, closed_len_frac=closed_len_frac,
                 necked_len_frac=necked_len_frac, defect_y=defect_y, open_len_frac=f_raw,
-                channel_confidence=chan_conf, longest_fill=longest_fill, blind=blind)
+                channel_confidence=chan_conf, longest_fill=longest_fill, blind=blind, **halves)
 
 
 def touchdown(line, arc, tr, h):
@@ -1095,6 +1145,8 @@ def save_overlay(dev, R, results, walls, faces, info, out_png):
             extra = f"\nmin {100 * r['w_min_frac']:.0f}%, {100 * r['necked_len_frac']:.0f}% of L"
         if r["blind"]:
             extra += "\n(blind: one port)"
+        if np.isfinite(r["tip_gap_frac"]) and r["tip_gap_frac"] > 0 and r["cls"] == "PINCHED":
+            extra += f"\ntip gap {100 * r['tip_gap_frac']:.0f}% of L"
         if r["touchdown"]:
             extra += f"\ntouchdown {100 * r['touchdown_frac']:.0f}%"
         if r["channel_confidence"] == "LOW":
@@ -1132,6 +1184,28 @@ def save_overlay(dev, R, results, walls, faces, info, out_png):
         ax3.legend(fontsize=6, ncol=min(6, len(results)), loc="upper center", bbox_to_anchor=(0.5, -0.35))
     fig.savefig(out_png, dpi=110, bbox_inches="tight")
     plt.close(fig)
+
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def load_tags(path):
+    """Frame tags: CSV with columns pattern (regex on the file name) and print_mode. The first
+    matching row wins; unmatched frames are 'standard'."""
+    tags = []
+    if path and os.path.exists(path):
+        with open(path, newline="") as f:
+            for row in csv.DictReader(f):
+                if row.get("pattern"):
+                    tags.append((re.compile(row["pattern"]), row["print_mode"].strip()))
+    return tags
+
+
+def print_mode_of(fn, tags):
+    for rx, mode in tags:
+        if rx.search(os.path.basename(fn)):
+            return mode
+    return "standard"
 
 
 def read_manifest(images_dir):
@@ -1237,7 +1311,7 @@ def assign_ml(rows):
     for r in rows:
         if r.get("ML") in ("", None):
             continue
-        key = (r["H_layers"], r["W_px"], r["R"], r["ML"])
+        key = (r["H_layers"], r["W_px"], r["R"], r["ML"], r.get("print_mode", "standard"))
         score = (r.get("device_confidence") != "LOW", r.get("channel_confidence") != "LOW",
                  min(float(r["x_frac"]), 1 - float(r["x_frac"])))
         if key not in best or score > best[key][0]:
@@ -1251,15 +1325,15 @@ CLASS_LETTER = dict(FORMED="F", NECKED="N", PINCHED="P", NOT_FORMED="X", UNRESOL
 
 
 def plot_ml_map(cells, out_png, widths=None):
-    """Categorical W x ML map per H: one cell per physical channel (replicates, if any, by majority).
-    widths: {H: [W, ...]} of every imaged design, so a design with no assignable channel still gets a
-    gray column instead of disappearing."""
-    Hs = sorted({c["H_layers"] for c in cells} | set(widths or {}))
+    """Categorical W x ML map per panel (H, and print mode when not standard): one cell per physical
+    channel (replicates, if any, by majority). widths: {panel: [W, ...]} of every imaged design, so a
+    design with no assignable channel still gets a gray column instead of disappearing."""
+    Hs = sorted({c["panel"] for c in cells} | set(widths or {}))
     if not Hs:
         return
     fig, axes = plt.subplots(len(Hs), 1, figsize=(12, 3.6 * len(Hs)), squeeze=False)
     for ax, Hl in zip(axes[:, 0], Hs):
-        sub = [c for c in cells if c["H_layers"] == Hl]
+        sub = [c for c in cells if c["panel"] == Hl]
         Ws = sorted({c["W_px"] for c in sub} | set((widths or {}).get(Hl, [])))
         for x in range(len(Ws)):
             for y in range(10):
@@ -1279,7 +1353,7 @@ def plot_ml_map(cells, out_png, widths=None):
         ax.set_yticklabels([str(i + 1) for i in range(10)], fontsize=7)
         ax.set_xlabel("design channel width W (printer px, 1 px = 32 um)")
         ax.set_ylabel("roof thickness ML (layers)")
-        ax.set_title(f"H = {Hl} layers", loc="left", fontsize=9)
+        ax.set_title(f"H = {Hl}", loc="left", fontsize=9)
         ax.set_aspect("auto")
     handles = [plt.Rectangle((0, 0), 1, 1, color=CLASS_COLOR[c]) for c in CLASS_ORDER]
     handles += [plt.Rectangle((0, 0), 1, 1, color="#d9d9d9"), plt.Rectangle((0, 0), 1, 1, color="#f2f2f2", ec="#bbbbbb")]
@@ -1300,27 +1374,31 @@ def summarize(rows, out_dir):
     if not chan:
         return
     ml_mode = any(r.get("ML") not in ("", None) for r in rows)
+    mode = lambda r: r.get("print_mode") or "standard"
+    panel_of = lambda Hl, m: f"{Hl} layers" + ("" if m == "standard" else f", {m}")
     by_dev, by_hw = {}, {}
     for r in chan:
         by_dev.setdefault(r["file"], []).append(r)
-        # pooled per-width statistics: with ML-named frames, only the kept observation of each channel
+        # pooled per-width statistics: with ML-named frames, only the kept observation of each channel;
+        # frames printed in a different mode are pooled separately
         if not ml_mode or r.get("ml_use") in (True, "True"):
-            by_hw.setdefault((r["H_layers"], r["W_px"]), []).append(r)
+            by_hw.setdefault((r["H_layers"], r["W_px"], mode(r)), []).append(r)
 
     if ml_mode:
         groups = {}
         for r in rows:
             if r.get("ml_use") in (True, "True"):
-                groups.setdefault((int(r["H_layers"]), int(r["W_px"]), int(r["ML"])), []).append(r)
+                groups.setdefault((int(r["H_layers"]), mode(r), int(r["W_px"]), int(r["ML"])), []).append(r)
         cells, ml_rows = [], []
-        for (Hl, Wd, ml), items in sorted(groups.items()):
+        for (Hl, m, Wd, ml), items in sorted(groups.items()):
             good = [r for r in items if r.get("device_confidence") != "LOW"]
             use = good or items
             cls = max(CLASS_ORDER, key=lambda c: (sum(r["cls"] == c for r in use), -CLASS_ORDER.index(c)))
             td = any(r["touchdown"] in (True, "True") for r in use)
-            cells.append(dict(H_layers=Hl, W_px=Wd, ML=ml, cls=cls, touchdown=td, excluded=not good))
+            cells.append(dict(H_layers=Hl, panel=panel_of(Hl, m), W_px=Wd, ML=ml, cls=cls, touchdown=td,
+                              excluded=not good))
             one = use[0]
-            ml_rows.append(dict(H_layers=Hl, W_px=Wd, ML=ml, n_replicates=len(use), cls=cls,
+            ml_rows.append(dict(H_layers=Hl, print_mode=m, W_px=Wd, ML=ml, n_replicates=len(use), cls=cls,
                                 excluded_low_confidence=not good, touchdown=td,
                                 w_min_frac=one.get("w_min_frac", ""), closed_len_frac=one.get("closed_len_frac", ""),
                                 necked_len_frac=one.get("necked_len_frac", ""), file=one["file"],
@@ -1329,8 +1407,20 @@ def summarize(rows, out_dir):
         widths = {}
         for r in rows:
             if r.get("H_layers") not in ("", None) and r.get("W_px") not in ("", None):
-                widths.setdefault(int(r["H_layers"]), set()).add(int(r["W_px"]))
+                widths.setdefault(panel_of(int(r["H_layers"]), mode(r)), set()).add(int(r["W_px"]))
         plot_ml_map(cells, os.path.join(out_dir, "channel_state_map_W_ML.png"), widths)
+
+    def num(v):
+        try:
+            x = float(v)
+            return x if np.isfinite(x) else None
+        except (TypeError, ValueError):
+            return None
+
+    def mean_of(items, key, nd=3):
+        vals = [num(r.get(key)) for r in items]
+        vals = [v for v in vals if v is not None]
+        return round(float(np.mean(vals)), nd) if vals else ""
 
     def agg(items):
         n = len(items)
@@ -1343,7 +1433,30 @@ def summarize(rows, out_dir):
         cl = [r["closed_len_frac"] for r in items if r["cls"] == "PINCHED"]
         d["mean_closed_len_frac_of_pinched"] = round(float(np.mean(cl)), 3) if cl else ""
         d["n_touchdown"] = sum(1 for r in items if r["touchdown"])
+        # lumen geometry (see measure_halves): widths in um, taper = inner/base width of a half,
+        # narrowing = width lost per unit length toward the middle, tip gap between the two halves
+        d["mean_w_ref_um"] = mean_of(items, "w_ref_um", 1)
+        d["mean_w_base_um"] = mean_of(items, "_w_base_um", 1)
+        d["mean_taper"] = mean_of(items, "_taper")
+        d["mean_narrowing"] = mean_of(items, "_narrowing", 4)
+        d["mean_open_half_len_frac"] = mean_of(items, "_open_half_len_frac")
+        d["mean_tip_gap_frac"] = mean_of(items, "_tip_gap_frac")
+        d["mean_tip_gap_um"] = mean_of(items, "_tip_gap_um", 0)
+        d["n_with_lumen"] = sum(1 for r in items if r["cls"] in ("FORMED", "NECKED", "PINCHED"))
         return d
+
+    # per-channel means over the two halves, so a stub from either port counts once; geometry is
+    # pooled only over channels with a lumen (FORMED, NECKED, PINCHED)
+    pairs = {"_w_base_um": ("w_base_top_um", "w_base_bot_um"), "_taper": ("taper_top", "taper_bot"),
+             "_narrowing": ("narrowing_top", "narrowing_bot"),
+             "_open_half_len_frac": ("open_top_len_frac", "open_bot_len_frac")}
+    for r in chan:
+        has_lumen = r["cls"] in ("FORMED", "NECKED", "PINCHED")
+        for k, (kt, kb) in pairs.items():
+            vals = [v for v in (num(r.get(kt)), num(r.get(kb))) if v is not None]
+            r[k] = float(np.mean(vals)) if vals and has_lumen else ""
+        r["_tip_gap_frac"] = r.get("tip_gap_frac", "") if has_lumen else ""
+        r["_tip_gap_um"] = r.get("tip_gap_um", "") if has_lumen else ""
 
     dev_rows = []
     for fn, items in by_dev.items():
@@ -1353,20 +1466,35 @@ def summarize(rows, out_dir):
         dev_rows.append(d)
     write_csv(os.path.join(out_dir, "device_summary.csv"), dev_rows)
     hw_rows = []
-    for (Hl, Wd), items in sorted(by_hw.items(), key=lambda kv: (int(kv[0][0] or 0), int(kv[0][1] or 0))):
+    for (Hl, Wd, m), items in sorted(by_hw.items(), key=lambda kv: (int(kv[0][0] or 0), kv[0][2], int(kv[0][1] or 0))):
         # a device is one replicate R when the names carry it; otherwise each frame counts as one
-        d = dict(H_layers=Hl, W_px=Wd, n_devices=len({r.get("R") or r["file"] for r in items}),
-                 n_frames=len({r["file"] for r in items}))
+        d = dict(H_layers=Hl, print_mode=m, panel=panel_of(int(Hl), m), W_px=Wd,
+                 n_devices=len({r.get("R") or r["file"] for r in items}), n_frames=len({r["file"] for r in items}))
         d.update(agg(items))
         hw_rows.append(d)
     write_csv(os.path.join(out_dir, "summary_by_H_W.csv"), hw_rows)
+    # side-by-side comparison of print modes (same H and W, different mode)
+    modes = sorted({r["print_mode"] for r in hw_rows})
+    if len(modes) > 1:
+        cmp_rows = []
+        keys = ["n_channels", "n_with_lumen", "frac_open_end_to_end", "frac_PINCHED", "frac_NOT_FORMED", "mean_w_ref_um",
+                "mean_w_base_um", "mean_taper", "mean_narrowing", "mean_open_half_len_frac", "mean_tip_gap_frac",
+                "mean_tip_gap_um"]
+        for (Hl, Wd) in sorted({(int(r["H_layers"]), int(r["W_px"])) for r in hw_rows}):
+            row = dict(H_layers=Hl, W_px=Wd)
+            for m in modes:
+                hit = [r for r in hw_rows if int(r["H_layers"]) == Hl and int(r["W_px"]) == Wd and r["print_mode"] == m]
+                for k in keys:
+                    row[f"{k}[{m}]"] = hit[0][k] if hit else ""
+            cmp_rows.append(row)
+        write_csv(os.path.join(out_dir, "summary_by_print_mode.csv"), cmp_rows)
 
     # stacked class fractions vs W, one panel per H
-    Hs = sorted({int(r["H_layers"]) for r in hw_rows if r["H_layers"] not in ("", None)})
+    Hs = sorted({r["panel"] for r in hw_rows if r["H_layers"] not in ("", None)})
     if Hs:
         fig, axes = plt.subplots(len(Hs), 1, figsize=(12, 3.2 * len(Hs)), squeeze=False)
         for ax, Hl in zip(axes[:, 0], Hs):
-            sub = sorted([r for r in hw_rows if int(r["H_layers"]) == Hl], key=lambda r: int(r["W_px"]))
+            sub = sorted([r for r in hw_rows if r["panel"] == Hl], key=lambda r: int(r["W_px"]))
             xs = np.arange(len(sub))
             bottom = np.zeros(len(sub))
             for c in CLASS_ORDER:
@@ -1376,7 +1504,7 @@ def summarize(rows, out_dir):
             ax.set_xticks(xs)
             ax.set_xticklabels([f"W{r['W_px']}\n(n={r['n_channels']})" for r in sub], fontsize=7)
             ax.set_ylabel("fraction of channels")
-            ax.set_title(f"H = {Hl} layers: channel state vs design width (Asiga Ultra px)", fontsize=10)
+            ax.set_title(f"H = {Hl}: channel state vs design width (Asiga Ultra px)", fontsize=10)
             ax.set_ylim(0, 1)
         axes[0, 0].legend(fontsize=7, ncol=5, loc="upper center", bbox_to_anchor=(0.5, 1.35))
         fig.tight_layout()
@@ -1392,7 +1520,10 @@ def main():
     ap.add_argument("--bar-mm", type=float, default=P["bar_mm"], help="physical length of the scale bar")
     ap.add_argument("--pixel-um", type=float, default=P["pixel_um"], help="printer XY pixel pitch")
     ap.add_argument("--no-debug", action="store_true")
+    ap.add_argument("--tags", default=os.path.join(HERE, "frame_tags.csv"),
+                    help="CSV of (pattern, print_mode) rows; frames are pooled per print mode")
     args = ap.parse_args()
+    tags = load_tags(args.tags)
     P["bar_mm"], P["pixel_um"] = args.bar_mm, args.pixel_um
     os.makedirs(args.out, exist_ok=True)
     meta = read_manifest(args.images)
@@ -1423,7 +1554,9 @@ def main():
                     device_h_px=info["device_h_px"], device_w_px=info["device_w_px"],
                     pitch_px=fmt(info["pitch_px"], 1), n_walls=info["n_walls"],
                     port_source=info["diag"]["port_source"], device_confidence=info["diag"]["confidence"],
+                    print_mode=print_mode_of(fn, tags), w_ref_um=fmt(info["w_ref_px"] * info["um_per_px"], 1),
                     note=info["diag"].get("note", ""))
+        um = info["um_per_px"]
         for r in results:
             rows.append(dict(base, channel=r["index"], x_frac=fmt(r["x_frac"]), predicted=r["predicted"],
                              has_top_port=r["has_top"], has_bot_port=r["has_bot"], w_port_px=fmt(r["w_port"], 1),
@@ -1432,8 +1565,16 @@ def main():
                              w_min_px=fmt(r["w_min"], 1), w_min_frac=fmt(r["w_min_frac"]), w_min_y_frac=fmt(r["w_min_y"]),
                              closed_len_frac=fmt(r["closed_len_frac"]), necked_len_frac=fmt(r["necked_len_frac"]),
                              defect_y_frac=fmt(r["defect_y"]), blind=r["blind"], channel_confidence=r["channel_confidence"],
-                             touchdown=r["touchdown"],
-                             touchdown_frac=fmt(r["touchdown_frac"]), error=""))
+                             touchdown=r["touchdown"], touchdown_frac=fmt(r["touchdown_frac"]),
+                             w_min_um=fmt(r["w_min"] * um, 1),
+                             w_base_top_px=fmt(r["w_base_top"], 1), w_base_top_um=fmt(r["w_base_top"] * um, 1),
+                             w_inner_top_px=fmt(r["w_inner_top"], 1), taper_top=fmt(r["taper_top"]),
+                             narrowing_top=fmt(r["narrowing_top"], 4), open_top_len_frac=fmt(r["open_top_len_frac"]),
+                             w_base_bot_px=fmt(r["w_base_bot"], 1), w_base_bot_um=fmt(r["w_base_bot"] * um, 1),
+                             w_inner_bot_px=fmt(r["w_inner_bot"], 1), taper_bot=fmt(r["taper_bot"]),
+                             narrowing_bot=fmt(r["narrowing_bot"], 4), open_bot_len_frac=fmt(r["open_bot_len_frac"]),
+                             tip_gap_frac=fmt(r["tip_gap_frac"]), tip_gap_um=fmt(r["tip_gap_frac"] * info["device_h_px"] * um, 0),
+                             error=""))
         if not results:
             rows.append(dict(base, channel=0, cls="NO_PORTS_FOUND",
                              error=f"{info['n_walls']} wall lines, no aligned port pair: treat all cells as NOT_FORMED"))
@@ -1443,11 +1584,11 @@ def main():
         with open(csv_path, newline="") as f:
             old = [r for r in csv.DictReader(f) if r["file"] not in done]
         for r in old:   # CSV strings back to the types summarize() expects
-            for k in ("w_min_frac", "closed_len_frac", "necked_len_frac", "touchdown_frac", "open_len_frac"):
-                if r.get(k) not in (None, ""):
-                    r[k] = float(r[k])
+            for k, v in list(r.items()):
+                if isinstance(v, str) and re.fullmatch(r"-?\d+(\.\d+)?(e-?\d+)?", v):
+                    r[k] = float(v)
             r["channel"] = int(r["channel"]) if r.get("channel") else 0
-            r["touchdown"] = r.get("touchdown") == "True"
+            r["touchdown"] = r.get("touchdown") in (True, "True")
         rows = old + rows
         rows.sort(key=lambda r: (r["file"], r.get("channel", 0)))
     if rows:

@@ -28,7 +28,20 @@ Characterization of 3D-Printed Microfluidic Channels and Valves*
 
 Also reported: narrowest width and its position, necked fraction, defect
 position, `touchdown_frac` (area enclosed by an inner closed outline, i.e. the
-roof resting on the floor), and channel/device confidence. The *reference width*
+roof resting on the floor), and channel/device confidence.
+
+Lumen geometry per channel (columns `*_top` for the half that starts at the top
+face of the frame, `*_bot` for the half that ends at the bottom face; a
+continuous channel is split at mid-length): `w_base_*_um` = width near the port
+(median of the outer 20% of the half, after the port flare), `w_inner_*_px` =
+width at the tip or at mid-length (innermost 10%), `taper_*` = inner / base
+(1 = constant width, 0.5 = tapers to half), `narrowing_*` = width lost per unit
+length toward the middle from a linear fit (px per px, positive = thinning),
+`open_*_len_frac` = length of the half as a fraction of the channel, and
+`tip_gap_frac` / `tip_gap_um` = distance between the two inner tips (0 for a
+continuous channel; a missing half counts from the opposite face). These tell
+a wide stub that stops far from the middle from a narrow one whose tips nearly
+meet. The *reference width*
 is the printed width (median over the device's channels of the 85th percentile
 of their open width), not the design width.
 
@@ -74,12 +87,17 @@ matched to the ML range are flagged in `ml_note` and left out of the map.
 
 Options: `--only <substring>` runs matching files, `--bar-mm` and `--pixel-um`
 override the scale-bar length and the printer pixel pitch (32 um, Asiga Ultra),
-`--no-debug` skips the overlays. Setting the environment variable `TV_DEBUG=1`
+`--no-debug` skips the overlays, `--tags <csv>` points at a frame-tag file
+(default `frame_tags.csv` next to the script): rows of `pattern,print_mode`,
+where `pattern` is a regular expression on the file name. Frames of different
+print modes (for example the Asiga transparency mode on or off) are pooled and
+mapped separately, and `summary_by_print_mode.csv` puts the modes side by side
+per design (class fractions, widths, taper, tip gap). Setting the environment variable `TV_DEBUG=1`
 prints per-channel tracking diagnostics.
 
 Outputs: `channel_results.csv` (one row per channel), `device_summary.csv`
-(one row per image), `summary_by_H_W.csv` (one row per design, low-confidence
-devices excluded), `class_fractions_vs_W.png`, and one `*_overlay.png` per image
+(one row per image), `summary_by_H_W.csv` (one row per design and print mode,
+low-confidence devices excluded), `class_fractions_vs_W.png`, and one `*_overlay.png` per image
 (tracked walls in class colors, response map, width profile).
 
 `examples/` holds two top views: `example_H5_W50.jpg` (expert-reviewed; three

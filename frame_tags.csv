@@ -1,0 +1,2 @@
+pattern,print_mode,comment
+_R1_top_H5_W([1-9]|1[0-9]|20)_ML,transparency_on,"2026-09-15 H5 R1 frames W1-W20 were printed with the Asiga transparency mode ON (wrong setting); R2, R3 and all H10 frames have it OFF (standard). Pooled and mapped separately."
