@@ -1,7 +1,9 @@
 # Top-view channel-formation analysis of 3D-printed microfluidic channels
 
-> **Status: under active development.** The classes and thresholds below are
-> the version described in the preprint (22 September 2026); expect changes.
+> **Status: under active development.** The preprint (22 September 2026)
+> describes an earlier version with four classes; the `TOUCHDOWN` class, the
+> closure regimes and the count enforcement were added after an expert review
+> in October 2026. Expect further changes.
 
 Python program that looks at a top-view micrograph of a 3D-printed
 *printability device* (a row of parallel enclosed channels running from one face
@@ -22,13 +24,25 @@ Characterization of 3D-Printed Microfluidic Channels and Valves*
 |---|---|
 | `FORMED` | open from port to port, narrowest point at least 75% of the device's printed reference width |
 | `NECKED` | open from port to port, narrower than 75% somewhere (a partial pinch) |
-| `PINCHED` | closed somewhere (narrower than 15%); `closed_len_frac` = closed fraction of the length; `blind` = open from one port only |
-| `NOT_FORMED` | nothing beyond the port wedges, or open over less than 20% of the length |
-| `UNRESOLVED` | both walls lost over more than half the length with no closure evidence; review by eye |
+| `PINCHED` | closed by cured resin between the side walls; `closed_len_frac` = closed fraction of the length; `blind` = open from one port only |
+| `TOUCHDOWN` | the channel formed, but the roof membrane rests on the floor (often around a trapped bubble); `roof_down_frac` = fraction of the length where the roof is down, 1.0 when nothing of the lumen is visible from above |
+| `NOT_FORMED` | nothing beyond the port wedges (a stub longer than 4% of the length counts as a lumen) |
+
+Two things close a channel, and cross-sections tell them apart: in narrow
+channels a uniform plug of cured resin joins the side walls; in wide channels
+the roof sags onto the floor. From above both look like a lumen that stops. The
+program decides by design width (`regime` column): at W <= 25 printer px a
+closure is a plug (`PINCHED`), at W >= 70 px it is the roof (`TOUCHDOWN`), and in
+between the lumen ends decide: tips that taper to a point (inner/base width
+below 0.5) mean a plug, blunt ends mean the roof came down. These bounds are
+the `plug_w_px`, `touchdown_w_px` and `plug_taper` parameters and came from an
+expert review of 242 frames (October 2026).
 
 Also reported: narrowest width and its position, necked fraction, defect
-position, `touchdown_frac` (area enclosed by an inner closed outline, i.e. the
-roof resting on the floor), and channel/device confidence.
+position, `touchdown_frac` (area enclosed by an inner closed outline inside an
+open lumen, a bubble or a patch of roof on the floor), and channel/device
+confidence (`LOW` for a cell placed without any visible port or classified
+across a long bridged gap).
 
 Lumen geometry per channel (columns `*_top` for the half that starts at the top
 face of the frame, `*_bot` for the half that ends at the bottom face; a
@@ -52,10 +66,17 @@ of their open width), not the design width.
 3. Dark-line, dark-arc, and dark-blob response maps (1 = 30% darker than the local mean).
 4. Ports (dark crescents/wedges at the faces), split or merged against the design width.
 5. Port pairing, channel pitch (design pitch unless three or more pairs support a
-   measured one), lattice completion.
+   measured one; with the channel count known from the file name, the span of the
+   ports on a face gives the pitch directly), lattice completion. When the name
+   gives the count, the lattice is refit on the port-bearing channels and the
+   window of that many consecutive slots with the most port evidence is kept, so
+   an extra cell at the frame edge is dropped and a missed channel keeps its number.
 6. Dynamic-programming tracking of the left and right wall of each channel, both orders.
-7. Presence (continuity of the tracked line), gap logic (closure vs. tracking
-   dropout vs. debris), reference width, classification, touchdown.
+7. Presence (continuity of the tracked line; runs shorter than the port wedge do
+   not count), gap logic (tapering tips, a dark cap, or in narrow designs a gap
+   longer than 12% of the length mean the lumen is closed there; shorter gaps are
+   tracking dropouts and are bridged), reference width, classification by regime,
+   touchdown.
 
 All tunables are in the `P` dictionary at the top of
 `topview_channel_pipeline.py`, one comment each.
@@ -103,11 +124,23 @@ low-confidence devices excluded), `class_fractions_vs_W.png`, and one `*_overlay
 `examples/` holds two top views: `example_H5_W50.jpg` (expert-reviewed; three
 open-channel outcomes side by side) and `example_H10_W100_2.jpg`.
 
+## Reviewing the calls
+`make_review_folder.py <folder> <results dirs...>` builds a small folder for a
+reviewer: one JPEG overlay per frame, a spreadsheet with one row per frame
+(what the code decided, and columns for what was right and wrong, by channel
+number) and a README. `score_against_review.py review_sheet.xlsx <results
+dirs...>` turns the filled-in sheet into a per-channel truth table and scores
+both the decisions the reviewer saw and a new results folder against it, so a
+code change can be measured before the next review round.
+
 ## Known limitations
-Faint walls lead to `UNRESOLVED` or low-confidence calls; a channel ending in a
-rounded blind tip without a dark rim can be bridged and reported as formed or
-necked; touchdown needs a closed inner outline (air bubbles can count); the
-thresholds were set on a small expert-reviewed set.
+The plug-versus-touchdown decision at W30 to W60 rests on the shape of the lumen
+ends and is the least certain call; faint walls in wide channels lower the
+confidence rather than the class; touchdown patches need a closed inner outline
+(air bubbles count too); a misread scale bar shifts every micrometer value of
+that frame (the lattice no longer depends on it when the file name carries the
+channel count); the thresholds were set against one reviewer's calls on 242
+frames of one resin.
 
 ## License
 MIT, see [`LICENSE`](LICENSE).

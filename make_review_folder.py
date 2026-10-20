@@ -24,9 +24,9 @@ JPEG_QUALITY = 82
 CLASSES = {
     "FORMED": "open from one port to the other, narrowest point at least 75% of the printed width",
     "NECKED": "open end to end but narrower than 75% somewhere (partial pinch)",
-    "PINCHED": "closed somewhere; 'closed x% of L' = closed fraction of the length; 'blind' = open from one port only",
-    "NOT_FORMED": "no lumen beyond the port wedges (or the roof is down along the whole length)",
-    "UNRESOLVED": "the code lost both walls over more than half the length and could not decide",
+    "PINCHED": "closed by cured resin between the side walls; 'closed x% of L' = closed fraction of the length; 'blind' = open from one port only",
+    "TOUCHDOWN": "formed, but the roof membrane rests on the floor (often around a trapped bubble); 'roof down x% of L' = fraction of the length",
+    "NOT_FORMED": "no lumen beyond the port wedges",
 }
 
 
@@ -52,6 +52,11 @@ def call_text(r):
             pass
         if r.get("blind") in ("True", True):
             txt += ", blind (one port only)"
+    if r["cls"] == "TOUCHDOWN":
+        try:
+            txt += f", roof down {100 * float(r['roof_down_frac']):.0f}% of length"
+        except (ValueError, KeyError):
+            pass
     if r["cls"] == "NECKED" and r.get("w_min_frac") not in ("", None):
         txt += f", narrowest {100 * float(r['w_min_frac']):.0f}% of width"
     if r.get("touchdown") in ("True", True):
@@ -125,7 +130,7 @@ def main(out_dir, results_dirs):
     for k, v in CLASSES.items():
         lg.append([k, v])
     lg.append([])
-    lg.append(["colors in the overlay", "green FORMED, orange NECKED, red PINCHED, gray NOT_FORMED, cyan UNRESOLVED"])
+    lg.append(["colors in the overlay", "green FORMED, orange NECKED, red PINCHED, purple TOUCHDOWN, gray NOT_FORMED"])
     lg.append(["cyan bars at the faces", "ports (channel openings) the code found"])
     lg.append(["blue dotted lines", "device walls the code found"])
     lg.append(["yellow x", "where the code put the pinch or the narrowest point"])
@@ -148,8 +153,8 @@ def main(out_dir, results_dirs):
 What is in this folder
   overlays/H5/, overlays/H10/   one picture per frame you imaged. The top panel is your image with what the
                                 code found drawn on it: the two walls of every channel it followed, colored by
-                                its decision (green FORMED, orange NECKED, red PINCHED, gray NOT_FORMED, cyan
-                                UNRESOLVED), the channel number and decision written above each channel, cyan
+                                its decision (green FORMED, orange NECKED, red PINCHED, purple TOUCHDOWN, gray
+                                NOT_FORMED), the channel number and decision written above each channel, cyan
                                 bars where it found the channel openings, blue dotted lines where it found
                                 device walls, a yellow x where it put a pinch, yellow fill where it saw the
                                 roof touching the floor. The two lower panels are for us; ignore them if you
@@ -180,7 +185,8 @@ The vocabulary the code uses (also on the "legend" sheet)
   PINCHED      closed somewhere; "closed x% of L" is the closed fraction of the channel length;
                "blind" means the lumen comes out of one port only
   NOT_FORMED   nothing beyond the port wedges, or the roof is down along the whole length
-  UNRESOLVED   the code lost both walls over more than half the length and did not decide
+  TOUCHDOWN    the channel formed but the roof membrane rests on the floor, often around a trapped
+               bubble; "roof down x% of L" is the fraction of the length where the roof is down
   touchdown    the roof membrane rests on the floor inside an otherwise open channel
 
 When you are done, save review_sheet.xlsx in this same folder (keep the name) and tell Roman.

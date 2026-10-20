@@ -12,13 +12,15 @@ Per channel the output is a class and a set of measurements:
     FORMED      open from port to port, narrowest point >= neck_frac (75%) of the reference width
     NECKED      open from port to port but narrowed below 75% somewhere ("partial pinch");
                 necked_len_frac = fraction of the length below 75%
-    PINCHED     closed somewhere (width below closed_frac, 15%, of the reference);
+    PINCHED     closed by cured resin between the side walls (narrow designs, or tapering tips);
                 closed_len_frac = fraction of the length that is closed (point pinch -> ~0.02,
                 half the channel -> ~0.5). blind = True when the lumen comes out of one
                 port only and ends inside the device.
-    NOT_FORMED  nothing beyond the port wedges
-    UNRESOLVED  both edges lost over more than half the length, no closure evidence
-                (review by eye)
+    TOUCHDOWN   the channel formed but the roof membrane rests on the floor (wide designs, or
+                blunt lumen ends), often around a trapped bubble; roof_down_frac = fraction of
+                the length where the roof is down (1.0 when no lumen is visible from above)
+    NOT_FORMED  nothing beyond the port wedges (narrow designs)
+    The regime (plug / touchdown / shape) comes from the design width, see P['plug_w_px'].
 The reference width is the device's PRINTED width: the median over its tracked
 channels of the 85th percentile of their open width.
 plus touchdown_frac: fraction of the lumen area enclosed by an inner closed
@@ -117,25 +119,44 @@ P = dict(
     debris_max_len=0.06,     # a closed run shorter than this where only ONE edge deflects is debris
     debris_asym=0.25,        # ... 'one edge': the other edge moved less than this fraction of the first
     taper_frac=0.4,          # a gap whose BOTH flanks get narrower than this x w_ref is a closure
-    gap_unresolved=0.5,      # a bridged gap longer than this fraction of the length -> UNRESOLVED (review by eye)
     cap_tau=0.8,             # response that counts as 'dark' for a lumen tip (above speckle) ...
     cap_cover=0.8,           # ... whose union over the cap window must span this fraction of the cell width
     cap_reach=0.04,          # cap window reaches this fraction of the length beyond the end of a lumen run
     closed_min_px=5,         # two edge lines closer than this cannot be resolved: closed ...
     closed_line_px=4,        # ... or closer than the track repulsion radius plus this
-    fill_low_conf=0.3,       # a bridged tracking dropout longer than this fraction of the length -> channel confidence LOW
     neck_frac=0.75,          # narrowest point below this x w_ref -> NECKED ("partially pinched")
     closed_frac=0.15,        # width below this x w_ref -> closed
-    not_formed_present=0.20,
-    wedge_max=0.25,
+    # a lumen run shorter than this fraction of the length, touching a face, is the port wedge itself
+    # (the dark opening at the face), not a lumen. Review 2026-10 (Quynh): stubs of 5% of L and more
+    # are channels that formed and then pinched; the old value (0.25) called them NOT_FORMED.
+    wedge_max=0.04,
+    not_formed_present=0.04, # open fraction below this -> NOT_FORMED (same reasoning)
+    # rows where both walls are lost for longer than this fraction of the length are not open lumen:
+    # a formed lumen draws a continuous outline, its absence over a long stretch means the lumen is
+    # closed there (narrow design: resin plug; wide design: roof on the floor). Shorter gaps are
+    # tracking dropouts and are bridged.
+    dropout_max=0.12,
+    fill_low_conf=0.3,       # a bridged gap longer than this fraction of the length -> channel confidence LOW
+    # closure regime by design width W (printer px). Cross-sections (Roman, 2026-10-12): in narrow
+    # channels the closure is uniform cured resin between the side walls (a plug, class PINCHED); in
+    # wide channels it is the roof membrane resting on the floor, usually with a trapped bubble
+    # (TOUCHDOWN). The review placed the boundary between W20 and W50; in between the shape of the
+    # lumen ends decides: tips that taper to a point are a plug, blunt ends (the lumen keeps its width
+    # up to a front across the channel) are the roof coming down.
+    plug_w_px=25,            # W at or below this: closures are plugs
+    touchdown_w_px=70,       # W at or above this: closures are touchdown (the review is unanimous from W70 up)
+    plug_taper=0.5,          # in between: mean inner/base width of the stubs below this -> plug
+    touchdown_class_frac=0.10,  # roof on the floor over at least this fraction of the length -> class TOUCHDOWN
+    touchdown_neck_frac=0.4, # touchdown regime: a lumen narrowed below this x w_ref is the roof front, roof down there
     edge_exclude=0.12,       # ignore the port flare when looking for the narrowest point
     touchdown_tau=0.5,       # dark-line threshold for the inner (touchdown) outline
-    touchdown_min_frac=0.02, # report touchdown when the enclosed area exceeds this fraction of the lumen
+    touchdown_min_frac=0.02, # flag touchdown (bubble, patch) when the enclosed area exceeds this fraction of the lumen
+    touchdown_patch_frac=0.05,  # touchdown regime: an enclosed patch above this fraction of the lumen area -> class TOUCHDOWN
 )
 
-CLASS_ORDER = ["FORMED", "NECKED", "PINCHED", "NOT_FORMED", "UNRESOLVED"]
-CLASS_COLOR = dict(FORMED="#2ca02c", NECKED="#ff7f0e", PINCHED="#d62728", NOT_FORMED="#7f7f7f",
-                   UNRESOLVED="#17becf")
+CLASS_ORDER = ["FORMED", "NECKED", "PINCHED", "TOUCHDOWN", "NOT_FORMED"]
+CLASS_COLOR = dict(FORMED="#2ca02c", NECKED="#ff7f0e", PINCHED="#d62728", TOUCHDOWN="#9467bd",
+                   NOT_FORMED="#7f7f7f")
 
 
 def runs_of(mask):
@@ -477,7 +498,7 @@ def complete_lattice(channels, pitch, faces, w, w_exp, min_pairs=None):
     return [slots[kk] for kk in sorted(slots)]
 
 
-def find_channels(N, line, arc, blob, h, w, w_exp, pitch_exp=None):
+def find_channels(N, line, arc, blob, h, w, w_exp, pitch_exp=None, n_expected=None):
     ey, ex = max(1, int(P["face_skip"] * h)), max(1, int(P["border_skip"] * w))
 
     def clear_edges(D):
@@ -615,9 +636,23 @@ def find_channels(N, line, arc, blob, h, w, w_exp, pitch_exp=None):
             base = float(np.min(pd_))
             mult = np.round(pd_ / base)
             cands.append(float(np.median(pd_ / np.maximum(mult, 1))))
+    # with the channel count known from the frame name, a face that shows nearly all its ports
+    # gives the pitch directly as the span of the ports over their number; this survives a
+    # misread scale bar, which the design pitch (wall + W in image px) does not
+    span_cands = []
+    if n_expected and n_expected >= 3:
+        for ports in faces:
+            # only a face that shows every port (at most one extra): fewer means a port is missing
+            # somewhere in the row, more means fragments, and both corrupt the span
+            if n_expected <= len(ports) <= n_expected + 1:
+                xs_p = sorted(p["x"] for p in ports)
+                cand = (xs_p[-1] - xs_p[0]) / (len(ports) - 1)
+                if pitch_exp is None or abs(cand - pitch_exp) / pitch_exp <= 0.4:
+                    span_cands.append(cand)
     if pitch_exp is not None:
         cands = [c for c in cands if abs(c - pitch_exp) / pitch_exp <= P["pitch_tol"]]
         cands.append(float(pitch_exp))
+    cands += [c for c in span_cands if c > P["pitch_min_over_wexp"] * w_exp]
     if cands and (paired or all_ports):
         x0 = paired[0]["x"] if paired else max(all_ports, key=lambda p: p["mass"])["x"]
         total = sum(p["mass"] for p in all_ports) or 1.0
@@ -643,15 +678,17 @@ def find_channels(N, line, arc, blob, h, w, w_exp, pitch_exp=None):
         best = max(cands, key=lambda c: sup[c])
         if pitch_exp is not None and sup[float(pitch_exp)] >= 0.9 * sup[best]:
             best = float(pitch_exp)          # the design pitch wins near-ties
-        # a measured pitch needs three real pairs and solid support to beat the design pitch
-        if pitch_exp is not None and (len(paired) < 3 or sup[best] < 0.6):
+        # a measured pitch needs three real pairs and solid support to beat the design pitch,
+        # unless it is the port-span pitch of a frame whose channel count is known
+        if pitch_exp is not None and (len(paired) < 3 or sup[best] < 0.6) and best not in span_cands:
             best = float(pitch_exp)
         if sup[best] > 0 or best == pitch_exp:
             pitch = best
             pitch_support = max(sup[best], 0.6 if best == pitch_exp else 0.0)
     elif wall_pitch is not None and pitch is None:
         pitch = wall_pitch
-    if pitch_exp is not None and (pitch is None or abs(pitch - pitch_exp) / pitch_exp > P["pitch_tol"]):
+    if pitch_exp is not None and (pitch is None or abs(pitch - pitch_exp) / pitch_exp > P["pitch_tol"]) \
+            and pitch not in span_cands:
         pitch = float(pitch_exp)
         pitch_support = 0.6
     if pitch is not None and len(paired) >= 1:
@@ -805,11 +842,17 @@ def measure_halves(w_cls, closed, h, reach, edge):
     a missing half counts from the opposite face)."""
     ok = ~np.isnan(w_cls) & ~closed
     runs = runs_of(ok)
-    top = next(((a, b) for a, b in runs if a <= reach), None)
-    bot = next(((a, b) for a, b in reversed(runs) if b >= h - reach), None)
+    start = max(reach, edge + 0.06 * h)     # a half may begin just past the port flare
+    # the longest open run that starts near the face (slivers inside the flare are not the stub)
+    tops = [(a, b) for a, b in runs if a <= start]
+    bots = [(a, b) for a, b in runs if b >= h - start]
+    top = max(tops, key=lambda r: r[1] - r[0]) if tops else None
+    bot = max(bots, key=lambda r: r[1] - r[0]) if bots else None
     if top and bot and top == bot:                      # continuous channel: split at mid-length
         a, b = top
         top, bot = (a, (a + b) // 2), ((a + b) // 2, b)
+    if os.environ.get("TV_DEBUG"):
+        print(f"   halves: open runs {[(round(a / h, 2), round(b / h, 2)) for a, b in runs]} start<={start / h:.2f} top {top} bot {bot}")
     out = dict(tip_gap_frac=np.nan, open_top_len_frac=0.0, open_bot_len_frac=0.0)
 
     def half(run, from_top):
@@ -841,22 +884,46 @@ def measure_halves(w_cls, closed, h, reach, edge):
     return out
 
 
-def classify_channel(tr, h, w_ref, arc, w_exp, blob=None, R_full=None):
+def closure_regime(W_design, w_exp):
+    """Which physical closure a mid-channel closure is (see P['plug_w_px'] and P['touchdown_w_px']):
+    'plug' (narrow designs), 'touchdown' (wide designs) or 'shape' (decide from the lumen ends)."""
+    if W_design is None:
+        return "plug" if w_exp < 2 * P["narrow_design_px"] else "shape"
+    if W_design <= P["plug_w_px"]:
+        return "plug"
+    if W_design >= P["touchdown_w_px"]:
+        return "touchdown"
+    return "shape"
+
+
+def classify_channel(tr, h, w_ref, arc, w_exp, blob=None, R_full=None, W_design=None, has_port=True):
+    """Class and measurements of one tracked channel.
+
+    Open rows are rows where both walls were followed (a lumen draws a continuous outline). Runs
+    shorter than the port wedge do not count. Between open runs, a short gap is a tracking dropout
+    and is bridged; a long gap, converging tips, or a dark cap mean the lumen is closed there. Rows
+    between the last open run and a face are closed too (the lumen did not reach that face), except
+    the port flare itself. A closure is a resin plug (PINCHED) in the narrow regime and the roof on
+    the floor (TOUCHDOWN) in the wide regime; in between, tapering tips mean a plug, blunt ends mean
+    the roof came down (closure_regime)."""
     present = tr["present"].copy()
     width = tr["width"].copy()
-    anchor = P["anchor_depth"] * h
     win = max(5, int(P["w_smooth"] * h) | 1)
+    reach, wedge = P["face_reach"] * h, P["wedge_max"] * h
+    flare = int(P["edge_exclude"] * h)
+    regime = closure_regime(W_design, w_exp)
 
-    raw_runs = runs_of(present)
+    # lumen runs: present runs longer than the port wedge
+    lumen_runs = [(a, b) for a, b in runs_of(present) if (b - a) > wedge]
+    present[:] = False
+    for a, b in lumen_runs:
+        present[a:b] = True
     f_raw = float(present.mean())
-    only_wedges = (w_exp < 2 * P["narrow_design_px"]) and all(
-        (b - a) <= P["wedge_max"] * h and (a <= anchor or b >= h - anchor) for a, b in raw_runs)
 
     def capped(y0, y1):
-        """Is the lumen closed off by a dark cap (rounded blind end, converging
-        tips) in rows y0:y1? The union over these rows of strong dark structure
-        must cover nearly the whole width between the two edges; a tracking
-        dropout leaves the interior open."""
+        """Is the lumen closed off by a dark cap (rounded blind end, converging tips) in rows y0:y1?
+        The union over these rows of strong dark structure must cover nearly the whole width between
+        the two edges; a tracking dropout leaves the interior open."""
         y0, y1 = max(0, y0), min(h, y1)
         if y1 <= y0:
             return False
@@ -870,54 +937,52 @@ def classify_channel(tr, h, w_ref, arc, w_exp, blob=None, R_full=None):
         return bool(cover > P["cap_cover"])
 
     longest_fill = 0.0
-    # interior gaps: a closure when both flanks taper (converging tips) or
-    # when the gap is too long to be a tracking dropout; otherwise a dropout
-    # that is bridged by interpolation
-    for a, b in runs_of(~present):
-        if a == 0 or b == h:
-            continue
-        fl = width[max(0, a - win):a]
-        fr = width[b:b + win]
-        fl, fr = fl[~np.isnan(fl)], fr[~np.isnan(fr)]
-        ml = np.min(fl) if fl.size else np.nan
-        mr = np.min(fr) if fr.size else np.nan
-        tapers = (np.isfinite(ml) and ml < P["taper_frac"] * w_ref) and (np.isfinite(mr) and mr < P["taper_frac"] * w_ref)
-        cw_in, cw_out = max(3, int(0.01 * h)), max(6, int(P["cap_reach"] * h))
-        caps = capped(a - cw_in, a + cw_out) or capped(b - cw_out, b + cw_in)
-        if tapers or caps:
-            width[a:b] = 0.0
-        else:
-            # dropout: bridge with the flank medians (single end rows are noisy),
-            # but keep the raw tracked width where one edge was still followed
-            # (a faint neck should not be erased by the bridge)
-            wl = np.median(fl) if fl.size else width[a - 1]
-            wr = np.median(fr) if fr.size else width[min(b, h - 1)]
-            bridge = np.interp(np.arange(a, b), [a - 1, b], [wl, wr])
-            raw = nanmedfilt(tr["width_raw"][a:b].astype(np.float32), win)
-            one_edge = (tr["hitL"][a:b] > P["hit_frac"]) | (tr["hitR"][a:b] > P["hit_frac"])
-            width[a:b] = np.where(one_edge & (raw > 0), np.minimum(bridge, raw), bridge)
-            longest_fill = max(longest_fill, (b - a) / h)
-        present[a:b] = True
+    if lumen_runs:
+        # interior gaps
+        for a, b in runs_of(~present):
+            if a == 0 or b == h:
+                continue
+            fl = width[max(0, a - win):a]
+            fr = width[b:b + win]
+            fl, fr = fl[~np.isnan(fl)], fr[~np.isnan(fr)]
+            ml = np.min(fl) if fl.size else np.nan
+            mr = np.min(fr) if fr.size else np.nan
+            tapers = (np.isfinite(ml) and ml < P["taper_frac"] * w_ref) and (np.isfinite(mr) and mr < P["taper_frac"] * w_ref)
+            cw_in, cw_out = max(3, int(0.01 * h)), max(6, int(P["cap_reach"] * h))
+            caps = capped(a - cw_in, a + cw_out) or capped(b - cw_out, b + cw_in)
+            # a narrow lumen draws a crisp outline, so losing both walls for long means it is closed
+            # there; a wide lumen's walls can fade while it stays open (review: "necked"), so a long
+            # gap without taper or cap is bridged there and only lowers the confidence
+            long_gap = regime == "plug" and (b - a) > P["dropout_max"] * h
+            if tapers or caps or long_gap:
+                width[a:b] = 0.0
+            else:
+                # dropout: bridge with the flank medians (single end rows are noisy), but keep the
+                # raw tracked width where one edge was still followed (a faint neck survives)
+                wl = np.median(fl) if fl.size else width[a - 1]
+                wr = np.median(fr) if fr.size else width[min(b, h - 1)]
+                bridge = np.interp(np.arange(a, b), [a - 1, b], [wl, wr])
+                raw = nanmedfilt(tr["width_raw"][a:b].astype(np.float32), win)
+                one_edge = (tr["hitL"][a:b] > P["hit_frac"]) | (tr["hitR"][a:b] > P["hit_frac"])
+                width[a:b] = np.where(one_edge & (raw > 0), np.minimum(bridge, raw), bridge)
+                longest_fill = max(longest_fill, (b - a) / h)
+            present[a:b] = True
+        # end gaps: the lumen stops before a face -> closed from there to the port flare
+        a0, b0 = lumen_runs[0]
+        a1, b1 = lumen_runs[-1]
+        if a0 > reach:
+            width[flare:a0] = 0.0
+        if b1 < h - reach:
+            width[b1:h - flare] = 0.0
+    reaches_top = bool(lumen_runs) and lumen_runs[0][0] <= reach
+    reaches_bot = bool(lumen_runs) and lumen_runs[-1][1] >= h - reach
+
     w_cls = nanmedfilt(width, win)
     ok = ~np.isnan(w_cls)
     f_present = float(ok.mean())
-
-    reach, band = P["face_reach"] * h, P["port_band"] * h
-    cap_win = max(4, int(0.02 * h))
-    reaches_top = reaches_bot = False
-    if raw_runs:
-        a0, b0 = raw_runs[0]
-        reaches_top = a0 <= reach
-        a1, b1 = raw_runs[-1]
-        reaches_bot = b1 >= h - reach
-    # a detected crescent on a face proves the lumen opens there
-    if tr.get("has_top") and not tr.get("predicted"):
-        reaches_top = True
-    if tr.get("has_bot") and not tr.get("predicted"):
-        reaches_bot = True
     core = ok.copy()
-    core[: int(P["edge_exclude"] * h)] = False
-    core[h - int(P["edge_exclude"] * h):] = False
+    core[:flare] = False
+    core[h - flare:] = False
     if core.any():
         wc = np.where(core, w_cls, np.nan)
         i_min = int(np.nanargmin(wc))
@@ -926,12 +991,15 @@ def classify_channel(tr, h, w_ref, arc, w_exp, blob=None, R_full=None):
         w_min, w_min_y = np.nan, np.nan
     w_min_frac = w_min / w_ref if np.isfinite(w_min) else np.nan
 
-    # two tracks that repel each other cannot get closer than the suppression
-    # radius plus a line width: that is what a closed lumen looks like
+    # two tracks that repel each other cannot get closer than the suppression radius plus a line
+    # width: that is what a closed lumen looks like
     closed_px = max(P["closed_frac"] * w_ref, P["closed_min_px"], tr["sup"] + P["closed_line_px"])
+    if regime == "touchdown":
+        # the visible lumen narrows where the roof front comes down: roof down there too
+        closed_px = max(closed_px, P["touchdown_neck_frac"] * w_ref)
     closed = core & (w_cls < closed_px)
-    # drop short closed runs, and debris: a short closure where only one edge
-    # deflected (a real pinch pulls both edges toward the center)
+    # drop short closed runs, and debris: a short closure where only one edge deflected (a real
+    # pinch pulls both edges toward the center)
     for a, b in runs_of(closed):
         if (b - a) < P["closed_min_len"] * h:
             closed[a:b] = False
@@ -946,11 +1014,16 @@ def classify_channel(tr, h, w_ref, arc, w_exp, blob=None, R_full=None):
             if big > 0 and small < P["debris_asym"] * big:
                 closed[a:b] = False
                 w_cls[a:b] = np.interp(np.arange(a, b), [a - 1, b], [w_cls[max(a - 1, 0)], w_cls[min(b, h - 1)]])
-    necked = core & (w_cls < P["neck_frac"] * w_ref)
+    fronts = np.zeros(h, bool)
+    if regime != "plug" and R_full is not None:
+        # the roof front crosses the lumen while the walls stay straight: roof down there
+        fronts = roof_front_rows(tr, R_full, arc, blob, h, flare, tr["present"]) & core
+        closed = closed | fronts
+    necked = core & (w_cls < P["neck_frac"] * w_ref) & ~closed
     n_core = max(1, int(core.sum()))
     closed_len_frac = float(closed.sum()) / n_core
     necked_len_frac = float(necked.sum()) / n_core
-    halves = measure_halves(w_cls, closed, h, reach, int(P["edge_exclude"] * h))
+    halves = measure_halves(w_cls, closed, h, reach, flare)
 
     def run_center(mask):
         rr = runs_of(mask)
@@ -960,46 +1033,118 @@ def classify_channel(tr, h, w_ref, arc, w_exp, blob=None, R_full=None):
         return 0.5 * (a + b) / h
 
     blind = False
-    if only_wedges or f_raw < P["not_formed_present"]:
-        cls = "NOT_FORMED"           # no lumen along the length (ports/wedges only, or roof down)
-    elif reaches_top and reaches_bot:
-        if closed.any():
-            cls = "PINCHED"          # closed_len_frac says how much of the length
-        elif necked.any():
-            cls = "NECKED"
+    roof_down_frac = 0.0
+    chan_conf = "HIGH"
+    if not lumen_runs or f_raw < P["not_formed_present"]:
+        if regime == "touchdown":
+            # a wide channel always forms; when nothing of it is visible from above the roof is on
+            # the floor along the whole length (review 2026-10: "formed but the membrane touched down")
+            cls, roof_down_frac = "TOUCHDOWN", 1.0
+            chan_conf = "HIGH" if has_port else "LOW"
         else:
-            cls = "FORMED"
-    elif f_raw >= P["not_formed_present"]:
-        # lumen from one port only: closed before it reaches the other face
-        cls = "PINCHED"
-        blind = True
-        closed_len_frac = max(closed_len_frac, 1.0 - f_raw)
-        ends = [b for a, b in raw_runs if a <= reach] + [a for a, b in raw_runs if b >= h - reach]
-        defect_y = (ends[0] / h) if ends else np.nan
+            cls = "NOT_FORMED"           # ports/wedges only
+    elif closed.any():
+        blind = not (reaches_top and reaches_bot)
+        if regime == "plug":
+            kind = "plug"
+        elif regime == "touchdown" or fronts.any():
+            kind = "touchdown"
+        else:
+            # a tip that tapers to a point on either side is a plug; the roof front leaves blunt ends
+            tapers_ = [v for v in (halves.get("taper_top"), halves.get("taper_bot")) if np.isfinite(v)]
+            t = float(np.min(tapers_)) if tapers_ else np.nan
+            kind = "plug" if (np.isfinite(t) and t < P["plug_taper"]) else "touchdown"
+            if np.isfinite(t) and abs(t - P["plug_taper"]) < 0.1:
+                chan_conf = "LOW"
+        if kind == "plug":
+            cls = "PINCHED"
+        else:
+            roof_down_frac = closed_len_frac
+            cls = "TOUCHDOWN" if closed_len_frac >= P["touchdown_class_frac"] else ("NECKED" if necked.any() else "FORMED")
+    elif necked.any():
+        cls = "NECKED"
     else:
-        cls = "NOT_FORMED"
-    if not blind:
-        defect_y = run_center(closed) if cls == "PINCHED" else (run_center(necked) if cls == "NECKED" else np.nan)
-    chan_conf = "LOW" if longest_fill > P["fill_low_conf"] else "HIGH"
-    if longest_fill > P["gap_unresolved"] and cls in ("FORMED", "NECKED"):
-        cls = "UNRESOLVED"       # both edges lost over most of the length, no closure evidence
+        cls = "FORMED"
+    if cls in ("PINCHED", "TOUCHDOWN"):
+        defect_y = run_center(closed)
+    elif cls == "NECKED":
+        defect_y = run_center(necked)
+    else:
+        defect_y = np.nan
+    if not has_port and cls != "NOT_FORMED":
+        chan_conf = "LOW"
+    if longest_fill > P["fill_low_conf"]:
+        chan_conf = "LOW"                # a long bridged stretch: the class rests on interpolation
     return dict(cls=cls, w_cls=w_cls, f_present=f_present, reaches_top=reaches_top, reaches_bot=reaches_bot,
                 w_min=w_min, w_min_frac=w_min_frac, w_min_y=w_min_y, closed_len_frac=closed_len_frac,
                 necked_len_frac=necked_len_frac, defect_y=defect_y, open_len_frac=f_raw,
-                channel_confidence=chan_conf, longest_fill=longest_fill, blind=blind, **halves)
+                channel_confidence=chan_conf, longest_fill=longest_fill, blind=blind, regime=regime,
+                roof_down_frac=roof_down_frac, **halves)
+
+
+def wall_span(tr, present, h):
+    """Straight-wall estimate of the lumen span: the median tracked wall positions over the rows
+    where both walls were followed (the tracks wander where they were not)."""
+    if present.sum() < max(5, 0.05 * h):
+        return None
+    xl = int(np.median(tr["xL"][present])) + 2
+    xr = int(np.median(tr["xR"][present])) - 2
+    return (xl, xr) if xr - xl >= 4 else None
+
+
+def roof_front_rows(tr, R_full, arc, blob, h, flare, present):
+    """Rows where the roof is on the floor, read from fronts that cross the lumen.
+
+    Where the roof membrane meets the floor it draws a dark front across the channel (a U or a
+    bubble outline), while the side walls stay where they are, so the tracker reports an open lumen
+    of full width. A front is a row whose dark structure covers nearly the whole width between the
+    walls (P['cap_cover']), outside the port flares. Two or more fronts enclose the roof-down
+    stretch; a single front separates the open stub (the side with the tracked walls) from the
+    roof-down rest."""
+    mask = np.zeros(h, bool)
+    span = wall_span(tr, present, h)
+    if span is None:
+        return mask
+    a, b = span
+    capmap = arc if blob is None else np.maximum(arc, blob)
+    strong = np.maximum(capmap[:, a:b], R_full[:, a:b]) > P["cap_tau"]
+    cover = strong.mean(axis=1)
+    cover[:flare] = 0
+    cover[h - flare:] = 0
+    rows = np.where(cover > P["cap_cover"])[0]
+    if rows.size == 0:
+        return mask
+    first, last = int(rows[0]), int(rows[-1])
+    if last - first > 0.05 * h:
+        mask[first:last] = True
+    else:
+        y0 = (first + last) // 2
+        if present[:y0].sum() >= present[y0:].sum():
+            mask[y0:h - flare] = True        # open stub from the top face, roof down beyond the front
+        else:
+            mask[flare:y0] = True
+    return mask
 
 
 def touchdown(line, arc, tr, h):
-    """Fraction of the lumen area enclosed by an inner closed dark outline: the
-    roof membrane resting on the floor. Bubbles/islands count too; both mean
-    the lumen is not open there."""
+    """Fraction of the lumen area enclosed by an inner closed dark outline: a bubble under the roof
+    or a patch of roof on the floor. Both mean the lumen is not open there. The lumen span is taken
+    from the straight walls over the whole stretch between the first and last tracked rows, so a
+    bubble inside a bridged gap counts too."""
     present = tr["present"]
     if present.sum() < 0.1 * h:
         return 0.0, None
-    inside = np.zeros(line.shape, bool)
+    span = wall_span(tr, present, h)
+    if span is None:
+        return 0.0, None
     ys = np.where(present)[0]
-    for y in ys:
-        a, b = int(tr["xL"][y]) + 3, int(tr["xR"][y]) - 2
+    y0, y1 = int(ys[0]), int(ys[-1]) + 1
+    inside = np.zeros(line.shape, bool)
+    for y in range(y0, y1):
+        if present[y]:
+            a, b = int(tr["xL"][y]) + 3, int(tr["xR"][y]) - 2
+        else:
+            a, b = span
         if b > a:
             inside[y, a:b] = True
     if inside.sum() < 50:
@@ -1018,6 +1163,83 @@ def touchdown(line, arc, tr, h):
     enclosed = enclosed | (M & ndi.binary_dilation(enclosed, iterations=2))
     frac = float(enclosed.sum()) / float(inside.sum())
     return frac, enclosed
+
+
+def enforce_count(channels, k, pitch, w, w_exp, faces):
+    """The frame name says how many channels it shows (its ML range). Refit the pitch on the
+    channels that have port evidence, snap every channel to that lattice, and keep the window of
+    k consecutive slots with the most port evidence, filling empty slots inside it with predicted
+    cells. A missed channel then keeps its number and an extra cell at the frame edge is dropped.
+    Real port pairs are never dropped; with more of them than k the channels come back unchanged."""
+    if not k or pitch is None or not channels or len(channels) == k:
+        return channels
+
+    def score(c):
+        if c["top"] and c["bot"] and not c.get("predicted"):
+            return 3
+        if (c["top"] or c["bot"]) and c.get("predicted") != "lattice":
+            return 2
+        return 0
+
+    evid = sorted([c for c in channels if score(c) >= 2], key=lambda c: c["x"])
+    x_ref = evid[0]["x"] if evid else channels[0]["x"]
+    # the design pitch (wall + W) can be off by 10%, enough to drift a slot over ten cells: refit
+    # it on the channels that show ports
+    if len(evid) >= 3:
+        xs = np.array([c["x"] for c in evid])
+        dif = np.diff(xs)
+        mult = np.maximum(np.round(dif / pitch), 1)
+        p_fit = float(np.median(dif / mult))
+        if 0.75 * pitch < p_fit < 1.33 * pitch:
+            idx = np.concatenate([[0], np.cumsum(mult)])
+            A = np.column_stack([idx, np.ones_like(idx)])
+            (p_ls, x_ls), *_ = np.linalg.lstsq(A, xs, rcond=None)
+            if 0.75 * pitch < p_ls < 1.33 * pitch:
+                pitch, x_ref = float(p_ls), float(x_ls)
+    slots = {}
+    for c in channels:
+        kk = int(round((c["x"] - x_ref) / pitch))
+        if kk not in slots or score(c) > score(slots[kk]):
+            slots[kk] = c
+    # an edge cell may sit inside the detection border; let the lattice reach it
+    half = 0.5 * max(w_exp, 4.0)
+    lo_x, hi_x = max(half, 0.01 * w), w - max(half, 0.01 * w)
+    kmin = int(np.ceil((lo_x - x_ref) / pitch))
+    kmax = int(np.floor((hi_x - x_ref) / pitch))
+    if kmax - kmin + 1 < k:          # the frame cannot hold k cells on this lattice
+        return channels
+    must = [kk for kk, c in slots.items() if score(c) == 3]
+    best, best_key = None, None
+    for start in range(kmin, kmax - k + 2):
+        window = range(start, start + k)
+        if any(m not in window for m in must):
+            continue
+        val = sum(score(slots[kk]) for kk in window if kk in slots)
+        center = x_ref + (start + (k - 1) / 2) * pitch
+        key = (val, -abs(center - w / 2))       # ties: the window centered in the frame
+        if best is None or key > best_key:
+            best, best_key = start, key
+    if best is None:
+        return channels
+    all_ports = faces[0] + faces[1]
+    w_med = float(np.median([c["w_port"] for c in channels]))
+    out = []
+    for kk in range(best, best + k):
+        if kk in slots:
+            out.append(slots[kk])
+            continue
+        xp = x_ref + kk * pitch
+        near = [p for p in all_ports if abs(p["x"] - xp) < P["lattice_tol"] * pitch]
+        if near:
+            p = max(near, key=lambda q: q["mass"])
+            out.append(dict(top=p if p in faces[0] else None, bot=p if p in faces[1] else None,
+                            x=p["x"], x_top=p["x"], x_bot=p["x"], w_port=p["width"], predicted="port"))
+        else:
+            out.append(dict(top=None, bot=None, x=xp, x_top=xp, x_bot=xp,
+                            w_port=w_exp if w_exp >= P["narrow_design_px"] else w_med, predicted="lattice"))
+    if os.environ.get("TV_DEBUG"):
+        print(f"   enforce_count: {len(channels)} -> {k}, pitch {pitch:.1f}, slots {sorted(slots)}, window {best}..{best + k - 1}")
+    return out
 
 
 # ----------------------------------------------------------------------------
@@ -1043,7 +1265,11 @@ def process_image(path, out_dir, meta=None, save_debug=True):
     h, w = dev.shape
     N, line, arc, blob, R = dark_maps(dev)
     pitch_exp = (P["wall_mm"] * 1000.0 / um_per_px + w_exp) if np.isfinite(um_per_px) else None
-    channels, walls, pitch, diag, faces = find_channels(N, line, arc, blob, h, w, w_exp, pitch_exp)
+    _, ml_a, ml_b = parse_frame(path)
+    n_expected = abs(ml_a - ml_b) + 1 if ml_a is not None else None
+    channels, walls, pitch, diag, faces = find_channels(N, line, arc, blob, h, w, w_exp, pitch_exp, n_expected)
+    channels = enforce_count(channels, n_expected, pitch, w, w_exp, faces)
+    diag["n_expected"] = n_expected
 
     # pass 1: track every channel
     tracks = []
@@ -1061,9 +1287,13 @@ def process_image(path, out_dir, meta=None, save_debug=True):
             lo = max(lo, c["x"] - P["roi_cap"] * w_exp)
             hi = min(hi, c["x"] + P["roi_cap"] * w_exp)
             c = dict(c, w_port=max(c["w_port"], P["anchor_min_frac"] * w_exp))
-        bx = int(P["border_skip"] * w) + 2
-        x_lo = int(max(bx, lo + P["roi_margin_px"]))
-        x_hi = int(min(w - bx, hi - P["roi_margin_px"]))
+        # the tracking window stays off the frame border, except for an edge cell whose lumen
+        # itself reaches into the border
+        reach_x = 0.8 * max(w_exp, c["w_port"])
+        bxl = int(min(P["border_skip"] * w + 2, max(2, c["x"] - reach_x)))
+        bxr = int(min(P["border_skip"] * w + 2, max(2, w - c["x"] - reach_x)))
+        x_lo = int(max(bxl, lo + P["roi_margin_px"]))
+        x_hi = int(min(w - bxr, hi - P["roi_margin_px"]))
         if x_hi - x_lo < 6:
             continue
         w_max = None if w_exp >= P["narrow_design_px"] else max(4 * w_exp, 3) + 6
@@ -1085,11 +1315,17 @@ def process_image(path, out_dir, meta=None, save_debug=True):
     # pass 2: classify + touchdown
     results = []
     for tr in tracks:
-        cl = classify_channel(tr, h, w_ref, arc, w_exp, blob, R)
+        cl = classify_channel(tr, h, w_ref, arc, w_exp, blob, R, W_design=Wd,
+                              has_port=bool(tr["has_top"] or tr["has_bot"]))
         td_frac, td_mask = touchdown(line, arc, tr, h)
         tr.update(cl)
+        if cl["regime"] == "touchdown" and cl["cls"] in ("FORMED", "NECKED") and td_frac >= P["touchdown_patch_frac"]:
+            # a bubble or patch of roof on the floor inside a wide lumen: the roof came down there
+            tr["cls"], tr["roof_down_frac"] = "TOUCHDOWN", max(tr["roof_down_frac"], td_frac)
+            cl = dict(cl, cls="TOUCHDOWN")
         tr.update(touchdown_frac=td_frac, td_mask=td_mask,
-                  touchdown=(td_frac >= P["touchdown_min_frac"] and cl["cls"] in ("FORMED", "NECKED", "PINCHED")))
+                  touchdown=(cl["cls"] == "TOUCHDOWN")
+                  or (td_frac >= P["touchdown_min_frac"] and cl["cls"] in ("FORMED", "NECKED", "PINCHED")))
         results.append(tr)
 
     good = sum(1 for r in results if r["open_len_frac"] >= 0.6)
@@ -1141,6 +1377,8 @@ def save_overlay(dev, R, results, walls, faces, info, out_png):
         extra = ""
         if r["cls"] == "PINCHED":
             extra = f"\nclosed {100 * r['closed_len_frac']:.0f}% of L"
+        elif r["cls"] == "TOUCHDOWN":
+            extra = f"\nroof down {100 * r['roof_down_frac']:.0f}% of L"
         elif r["cls"] == "NECKED":
             extra = f"\nmin {100 * r['w_min_frac']:.0f}%, {100 * r['necked_len_frac']:.0f}% of L"
         if r["blind"]:
@@ -1321,7 +1559,7 @@ def assign_ml(rows):
     return rows
 
 
-CLASS_LETTER = dict(FORMED="F", NECKED="N", PINCHED="P", NOT_FORMED="X", UNRESOLVED="U")
+CLASS_LETTER = dict(FORMED="F", NECKED="N", PINCHED="P", TOUCHDOWN="T", NOT_FORMED="X")
 
 
 def plot_ml_map(cells, out_png, widths=None):
@@ -1344,7 +1582,7 @@ def plot_ml_map(cells, out_png, widths=None):
             ax.add_patch(plt.Rectangle((x - 0.5, y - 0.5), 1, 1, facecolor=color, edgecolor="white", lw=1.5))
             txt = "–" if c["excluded"] else CLASS_LETTER[c["cls"]] + ("*" if c["touchdown"] else "")
             ax.text(x, y, txt, ha="center", va="center", fontsize=7,
-                    color="black" if c["excluded"] or c["cls"] in ("NECKED", "UNRESOLVED") else "white")
+                    color="black" if c["excluded"] or c["cls"] == "NECKED" else "white")
         ax.set_xlim(-0.5, len(Ws) - 0.5)
         ax.set_ylim(-0.5, 9.5)
         ax.set_xticks(range(len(Ws)))
@@ -1545,6 +1783,7 @@ def main():
             rows.append(dict(file=fn, error=repr(e)))
             continue
         summary = ", ".join(f"{r['index']}:{r['cls'][:4]}" + (f"({100 * r['closed_len_frac']:.0f}%)" if r["cls"] == "PINCHED" else "")
+                            + (f"({100 * r['roof_down_frac']:.0f}%)" if r["cls"] == "TOUCHDOWN" else "")
                             + ("+TD" if r["touchdown"] else "") for r in results)
         print(f"{fn[-26:]:26s} H{info['H']} W{str(info['W']):>3s} wexp {info['w_exp_px']:5.0f} wref {info['w_ref_px']:5.0f} "
               f"n {info['n_channels']:2d} conf {info['diag']['confidence']:6s} -> {summary}")
@@ -1566,6 +1805,7 @@ def main():
                              closed_len_frac=fmt(r["closed_len_frac"]), necked_len_frac=fmt(r["necked_len_frac"]),
                              defect_y_frac=fmt(r["defect_y"]), blind=r["blind"], channel_confidence=r["channel_confidence"],
                              touchdown=r["touchdown"], touchdown_frac=fmt(r["touchdown_frac"]),
+                             regime=r["regime"], roof_down_frac=fmt(r["roof_down_frac"]),
                              w_min_um=fmt(r["w_min"] * um, 1),
                              w_base_top_px=fmt(r["w_base_top"], 1), w_base_top_um=fmt(r["w_base_top"] * um, 1),
                              w_inner_top_px=fmt(r["w_inner_top"], 1), taper_top=fmt(r["taper_top"]),
