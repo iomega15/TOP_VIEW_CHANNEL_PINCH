@@ -4,8 +4,9 @@
 > describes an earlier version with four classes; the `TOUCHDOWN` class, the
 > closure regimes and the count enforcement were added after an expert review
 > in October 2026. A second review round (November 2026) added the wide-design
-> rule (a port-to-port path test, doubled walls) and the pocket-based lattice
-> fit. Expect further changes.
+> rule (a port-to-port path test, doubled walls), the lattice fit to lumen ends
+> and step lines, and the entrance, pinch and stub measurements. Expect further
+> changes.
 
 Python program that looks at a top-view micrograph of a 3D-printed
 *printability device* (a row of parallel enclosed channels running from one face
@@ -136,7 +137,8 @@ the tip, `stub_top_w_um` the width (90th percentile of the row widths, so the
 flare at the mouth counts) and `stub_top_area_um2` the area; the `stub_bot_*`
 columns hold the same for the bottom port. At a port where a tracked lumen part
 begins, `ent_to_pinch_*` already gives the length of that part and the stub
-columns stay empty.
+columns stay empty. A stub is a lumen part: in a `PINCHED` channel the pinch
+starts at the tip of the stub and not at the entrance.
 
 The overlay draws all of this so that it can be checked by eye: green lines at
 the two entrances (dotted where inherited), a yellow bracket over the pinch
@@ -174,13 +176,19 @@ of their open width), not the design width.
    gives the count, the lattice is refit on the port-bearing channels and the
    window of that many consecutive slots with the most port evidence is kept, so
    an extra cell at the frame edge is dropped and a missed channel keeps its number.
-   For wide designs with a known count, a second lattice is fitted to the port
-   pockets (dark outline in the two face bands, averaged over a channel-wide
-   window) and to the straight lines midway between channels where the roof
-   thickness steps. It replaces the port-based channels only when it scores at
-   least 15% better and moves a channel by at least 15% of the pitch
-   (`lat_gain`, `lat_shift`); `lattice_note` in `channel_results.csv` records
-   the two scores and the decision.
+   With a known count, a second lattice is then fitted to two cues that tell a
+   lumen from the straight line between two channels. A lumen that pinched or
+   whose roof came down leaves a dark shape at each port and little at
+   mid-length (a tapered stub in a narrow design, a pocket in a wide one), so
+   the dark fraction of the two face bands minus that of the mid-length band,
+   averaged over a channel-wide window, peaks at the channel centers. The roof
+   thickness steps along a straight line midway between channels, which stays
+   dark over the full length. The second lattice replaces the port-based
+   channels only when it scores at least 15% better and moves a channel by at
+   least 15% of the pitch (`lat_gain`, `lat_shift`), or when the port-based
+   count is wrong; `lattice_note` in `channel_results.csv` records the two
+   scores and the decision. The fit ran on wide designs only until
+   19 November 2026 and now runs on every design (`lat_min_w_px`).
 6. Dynamic-programming tracking of the left and right wall of each channel, both orders.
 7. Presence (continuity of the tracked line; runs shorter than the port wedge do
    not count), gap logic (tapering tips, a dark cap, or in narrow designs a gap
@@ -254,8 +262,10 @@ walls are too faint to follow is called `TOUCHDOWN` with low confidence, and a
 trapped bubble that fills the lumen from wall to wall passes for an open
 channel. At W5 to W20 a stub shorter than a few percent of the length is easily
 missed, and in frames with strong surface texture the tracker can follow the
-texture and report a stub that is not there. The channel lattice of narrow
-designs still rests on the ports alone. The entrance, pinch and stub
+texture and report a stub that is not there. In a narrow design whose lumens
+are too faint to show at the ports, the lattice fit has little to hold on to
+and the channels can still sit off the lumens (such frames carry low
+confidence). The entrance, pinch and stub
 measurements have not yet been checked against a reviewer; a pocket that ends in a thin
 spike is measured to where the spike becomes too thin to resolve, and a channel
 placed off its lumen gives meaningless distances. A misread scale bar shifts every

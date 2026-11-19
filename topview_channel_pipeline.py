@@ -177,6 +177,7 @@ P = dict(
     ent_attach=0.08,         # a lumen part belongs to a port if it starts within this fraction of the lumen length of the entrance
     ent_flare=0.07,          # per-half narrowest point: skip this fraction of the lumen length at the entrance (port flare)
     extent_taus=(0.45, 0.35, 0.25),  # outline thresholds tried, strict to loose, to find where each port pocket ends
+    lat_min_w_px=0,          # designs at least this wide (printer px) get the lattice fit to pockets and step lines (0 = all designs; 50 = wide designs only, the rule before 2026-11-19)
     leak_jump=0.15,          # a pocket end that moves by more than this fraction of the lumen length between two outline thresholds is in dispute
     leak_gap=0.08,           # the longer pocket of a dispute is a leak when the tracked walls are missing over a run this long (fraction of the lumen length) inside the disputed stretch
     pinch_min=0.02,          # the two port pockets count as separated only if they stay this fraction of the lumen length apart
@@ -1697,6 +1698,11 @@ def wide_lattice(N, line, arc, channels, k, pitch, pitch_exp, faces, h, w, w_exp
     k-1 midpoints is compared with the channels found from the ports; it replaces them only when
     it scores clearly better and actually differs (P['lat_gain'], P['lat_shift']).
 
+    The same two cues hold in narrow designs (2026-11-19, R1 H5 W7 ML1-10: the port-based lattice
+    skipped the first lumen and put predicted channels on the step lines). A pinched lumen leaves a
+    tapered stub at each port and nothing at mid-length, while a step line is straight and dark over
+    the full length, so the fit now runs on every design at least P['lat_min_w_px'] wide (0 = all).
+
     Returns (channels, note)."""
     if not k or k < 2 or pitch_exp is None:
         return channels, ""
@@ -1782,7 +1788,7 @@ def process_image(path, out_dir, meta=None, save_debug=True):
     channels, walls, pitch, diag, faces = find_channels(N, line, arc, blob, h, w, w_exp, pitch_exp, n_expected)
     channels = enforce_count(channels, n_expected, pitch, w, w_exp, faces)
     diag["n_expected"] = n_expected
-    if Wd and Wd >= P["touchdown_w_px"] and n_expected:
+    if Wd and Wd >= P["lat_min_w_px"] and n_expected:
         channels, diag["lattice"] = wide_lattice(N, line, arc, channels, n_expected, pitch, pitch_exp, faces, h, w, w_exp)
         if "replaced" in diag["lattice"] and len(channels) >= 2:
             pitch = float(np.median(np.diff([c["x"] for c in channels])))
@@ -1864,6 +1870,20 @@ def process_image(path, out_dir, meta=None, save_debug=True):
             tr["stub_" + nm + "_len_px"] = st["len_px"] if st else np.nan
             tr["stub_" + nm + "_w_px"] = st["w_px"] if st else np.nan
             tr["stub_" + nm + "_area_px"] = st["area_px"] if st else np.nan
+        # a stub is a lumen part: where the pinch of a PINCHED channel starts at an entrance because
+        # the tracker found no part there, it starts at the tip of the stub instead
+        if cl["cls"] == "PINCHED" and np.isfinite(tr["tip_top_row"]):
+            t0, t1 = tr["tip_top_row"], tr["tip_bot_row"]
+            if tr["stub_top"] and t0 <= entr["top"] + 1:
+                t0 = min(entr["top"] + tr["stub_top"]["len_px"], t1)
+            if tr["stub_bot"] and t1 >= entr["bot"] - 1:
+                t1 = max(entr["bot"] - tr["stub_bot"]["len_px"], t0)
+            if (t0, t1) != (tr["tip_top_row"], tr["tip_bot_row"]) and t1 > t0:
+                off = (0.5 * (t0 + t1) - 0.5 * (entr["top"] + entr["bot"])) / L_
+                tr.update(tip_top_row=float(t0), tip_bot_row=float(t1), ent_to_pinch_top_frac=(t0 - entr["top"]) / L_,
+                          ent_to_pinch_bot_frac=(entr["bot"] - t1) / L_, pinch_len_frac=(t1 - t0) / L_,
+                          pinch_center_offset_frac=off, pinch_symmetric=bool(abs(off) <= P["sym_tol"]),
+                          defect_y=0.5 * (t0 + t1) / h)
         tr.update(touchdown_frac=td_frac, td_mask=td_mask,
                   touchdown=(cl["cls"] == "TOUCHDOWN")
                   or (td_frac >= P["touchdown_min_frac"] and cl["cls"] in ("FORMED", "NECKED", "PINCHED")))
