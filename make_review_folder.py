@@ -103,7 +103,7 @@ def main(out_dir, results_dirs):
     head = ["overlay file", "H", "W", "R", "ML range", "channels expected", "channels found",
             "device confidence", "print mode", "what the code decided",
             "overall: good / partly / wrong", "what it got RIGHT", "what it got WRONG (channel, what it should be)",
-            "other comments"]
+            "entrance / pinch marks: what is off (channel, what you see)", "other comments"]
     ws.append(head)
     for c in range(1, len(head) + 1):
         cell = ws.cell(row=1, column=c)
@@ -112,8 +112,8 @@ def main(out_dir, results_dirs):
         cell.fill = PatternFill("solid", fgColor="DDEBF7" if c <= 10 else "FFF2CC")
     for r in rows:
         ws.append([r["overlay"], r["H"], r["W"], r["R"], r["ML_range"], r["expected_channels"], r["channels_found"],
-                   r["device_confidence"], r["print_mode"], r["pipeline_calls"], "", "", "", ""])
-    widths = [58, 4, 5, 4, 9, 9, 9, 11, 14, 60, 16, 40, 48, 40]
+                   r["device_confidence"], r["print_mode"], r["pipeline_calls"], "", "", "", "", ""])
+    widths = [58, 4, 5, 4, 9, 9, 9, 11, 14, 60, 16, 40, 48, 48, 40]
     for i, w in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
     for row in ws.iter_rows(min_row=2):
@@ -173,7 +173,28 @@ What we need from you
      "ch6 was not found at all (no bar at the port)"; "the walls it drew on ch4 are the device wall,
      not the channel". If the number of channels found differs from the number expected, say which
      ones are missing or extra.
-  4. "other comments": anything else, for example frames where the image itself is the problem
+  4. "entrance / pinch marks": the overlay now also draws measurements. Tell us where one is off.
+     - green lines across each channel near the two faces: the lumen entrances (the edge of the
+       roof, where the lumen opens; not the edge of the base, which is farther out). Dotted
+       means the code did not see the edge in that channel and used the one of its neighbors.
+     - yellow bracket (a vertical line with two end bars) and an x at its middle: the pinch,
+       drawn from where the upper lumen part ends to where the lower one begins. The x must lie
+       between the two parts, never inside one.
+     - "ent-pinch T.. B..": distance from the top entrance to the pinch and from the bottom
+       entrance to the pinch, in percent of the lumen length. "pinch ..": its length. "off ..":
+       how far its middle sits from mid-length (plus = toward the bottom face; "sym" = centered).
+     - open channels: "neck T d@p B d@p" gives, for the top and bottom half, how much of the
+       width is lost at the narrowest point (d, percent) and how far that point is from its
+       entrance (p, percent of the lumen length). A yellow x marks a narrowing of 25% or more.
+       A yellow diamond at mid-length marks a bulge: the middle is wider than both narrowings.
+     - orange outline at a port: the short lumen stub that remains where the channel did not
+       form (both ports of a NOT_FORMED channel, the closed side of a channel open from one
+       port only). "stub T a x b" and "stub B a x b" give its length and width in micrometers
+       at the top and bottom port. The outline should hug the dark cup at the port and nothing
+       else.
+     Example: "ch2: the lower end bar is inside the lumen, the lumen ends higher up";
+     "bottom green line is on the base edge, not on the roof edge"; "ch1 has no bulge".
+  5. "other comments": anything else, for example frames where the image itself is the problem
      (out of focus, debris, cut off), or where you are unsure what the right answer is.
 
   Plain language is fine. Short is fine. Use the channel numbers written above the device.

@@ -144,7 +144,7 @@ P = dict(
     # lumen ends decides: tips that taper to a point are a plug, blunt ends (the lumen keeps its width
     # up to a front across the channel) are the roof coming down.
     plug_w_px=25,            # W at or below this: closures are plugs
-    touchdown_w_px=70,       # W at or above this: closures are touchdown (the review is unanimous from W70 up)
+    touchdown_w_px=50,       # W at or above this: closures are touchdown (round 2: her touchdown calls start at W50)
     plug_taper=0.5,          # in between: mean inner/base width of the stubs below this -> plug
     touchdown_class_frac=0.10,  # roof on the floor over at least this fraction of the length -> class TOUCHDOWN
     touchdown_neck_frac=0.4, # touchdown regime: a lumen narrowed below this x w_ref is the roof front, roof down there
@@ -152,6 +152,44 @@ P = dict(
     touchdown_tau=0.5,       # dark-line threshold for the inner (touchdown) outline
     touchdown_min_frac=0.02, # flag touchdown (bubble, patch) when the enclosed area exceeds this fraction of the lumen
     touchdown_patch_frac=0.05,  # touchdown regime: an enclosed patch above this fraction of the lumen area -> class TOUCHDOWN
+    front_tau=0.6,           # response that counts as a dark outline of a port pocket (wide_lattice)
+    front_margin=0.10,       # wall_companions: skip this fraction of the length at each face (port rim, crescent)
+    # port-to-port path through the lumen (lumen_path)
+    path_tau=0.45,           # dark outlines above this response are barriers
+    path_pad=0.12,           # the corridor is the wall span (or the design width) plus this x design width per side
+    path_margin=0.12,        # seeds sit this fraction of the length inside each face
+    path_speck=0.06,         # outline pieces shorter than this x design width are specks, not barriers
+    path_seal=0.03,          # gaps in an outline up to this x design width are sealed
+    # lattice of a wide design from the port pockets and the roof-step lines (wide_lattice)
+    lat_band=0.25,           # face bands, fraction of the length
+    lat_line_tau=0.3,        # line response that counts toward a step line
+    lat_mid_weight=1.0,      # weight of one step line against one fully dark pocket window
+    lat_pitch_tol=0.25,      # pitches searched around the design pitch
+    lat_edge=0.15,           # a center stays at least this x design width inside the frame
+    lat_gain=1.15,           # replace the port-based channels only if the fit scores this much better ...
+    lat_shift=0.15,          # ... and moves some channel by at least this fraction of the pitch
+    lat_min_score=0.25,      # ... and averages at least this score per channel
+    # lumen entrances (the roof edge at each face) and the entrance-to-pinch metrics (2026-11)
+    ent_band=0.12,           # the entrance is looked for within this fraction of the length from each face
+    ent_min=0.12,            # dark fraction of the channel mouth, above the walls between channels, that counts as the edge
+    ent_tol=0.03,            # a channel's own edge within this fraction of the length of the device median counts as detected
+    ent_default=0.04,        # entrance position (fraction of the length from the face) when no channel shows the edge
+    ent_attach=0.08,         # a lumen part belongs to a port if it starts within this fraction of the lumen length of the entrance
+    ent_flare=0.07,          # per-half narrowest point: skip this fraction of the lumen length at the entrance (port flare)
+    extent_taus=(0.45, 0.35, 0.25),  # outline thresholds tried, strict to loose, to find where each port pocket ends
+    leak_jump=0.15,          # a pocket end that moves by more than this fraction of the lumen length between two outline thresholds is in dispute
+    leak_gap=0.08,           # the longer pocket of a dispute is a leak when the tracked walls are missing over a run this long (fraction of the lumen length) inside the disputed stretch
+    pinch_min=0.02,          # the two port pockets count as separated only if they stay this fraction of the lumen length apart
+    stub_hw=0.9,             # port stub: half-width of the search window (x design width, or x port width if larger)
+    stub_open=0.12,          # port stub: opening kernel (x design width); cracks and edge lines thinner than this are not part of the stub
+    stub_tol=0.02,           # port stub: it must begin within this fraction of the device length of the lumen entrance
+    stub_blob=0.3,           # port stub: dark-blob response above this belongs to the stub body
+    stub_max_len=0.25,       # port stub: search this fraction of the lumen length from the entrance; a piece that runs past it is not a stub
+    sym_tol=0.05,            # pinch center within this fraction of the lumen length of mid-length -> symmetric
+    bulge_min=0.10,          # mid-length width exceeding both half minima by this x reference width -> bulged
+    comp_min=0.4,            # a companion line this long (fraction of the length) means the roof is down between the walls
+    comp_band=0.15,          # wall_companions: search this x design width to either side of a wall
+    open_wall_min=0.6,       # wide designs: both walls followed over at least this fraction of the core length -> open
 )
 
 CLASS_ORDER = ["FORMED", "NECKED", "PINCHED", "TOUCHDOWN", "NOT_FORMED"]
@@ -896,7 +934,8 @@ def closure_regime(W_design, w_exp):
     return "shape"
 
 
-def classify_channel(tr, h, w_ref, arc, w_exp, blob=None, R_full=None, W_design=None, has_port=True):
+def classify_channel(tr, h, w_ref, arc, w_exp, blob=None, R_full=None, W_design=None, has_port=True,
+                     path=None, td_frac=0.0, companion=0.0, ent=None, ext=None):
     """Class and measurements of one tracked channel.
 
     Open rows are rows where both walls were followed (a lumen draws a continuous outline). Runs
@@ -1065,10 +1104,133 @@ def classify_channel(tr, h, w_ref, arc, w_exp, blob=None, R_full=None, W_design=
         cls = "NECKED"
     else:
         cls = "FORMED"
-    if cls in ("PINCHED", "TOUCHDOWN"):
-        defect_y = run_center(closed)
+    path_block = None
+    if regime == "touchdown" and path is not None:
+        # Wide designs (review round 2, 2026-11). A wide channel always forms; what varies is whether
+        # the roof stays up. When it comes down, the side walls vanish from the top view and only the
+        # open pockets at the ports remain, each closed by a contact front, so the tracker's "walls"
+        # there are fronts. The class therefore rests on positive evidence that the lumen is open:
+        # a free path from port to port AND two walls followed over most of the length. Without
+        # both, or with a roof patch inside the lumen, the roof is down (TOUCHDOWN). A neck, however
+        # narrow, with a free path through it stays NECKED.
+        p_ok, p_top, p_bot = path
+        core_pres = float(tr["present"][flare:h - flare].mean()) if h > 2 * flare else 0.0
+        if not p_ok:
+            cls = "TOUCHDOWN"
+            a_, b_ = max(flare, min(p_top, p_bot)), min(h - flare, max(p_top, p_bot))
+            roof_down_frac = float(np.clip((b_ - a_) / n_core, P["touchdown_class_frac"], 1.0))
+            path_block = 0.5 * (a_ + b_) / h
+        elif core_pres < P["open_wall_min"]:
+            cls, roof_down_frac = "TOUCHDOWN", float(np.clip(1.0 - core_pres, P["touchdown_class_frac"], 1.0))
+            if core_pres >= 0.2:
+                chan_conf = "LOW"            # walls partly followed, no front found: could be a faint open lumen
+        elif td_frac >= P["touchdown_patch_frac"]:
+            cls, roof_down_frac = "TOUCHDOWN", float(td_frac)
+        elif companion >= P["comp_min"]:
+            # each wall is doubled by a contact line: the roof lies on the floor between two side slivers
+            cls, roof_down_frac = "TOUCHDOWN", float(min(1.0, companion))
+        else:
+            roof_down_frac = 0.0
+            cls = "NECKED" if (necked.any() or closed_len_frac >= P["touchdown_class_frac"]) else "FORMED"
+        blind = False
+    # ---- lumen parts, entrances and where the pinch sits (2026-11) ----------------------------
+    # The lumen is what is open: rows whose width is above the closed threshold (a narrow tongue
+    # still counts). If it is in two parts, one at each port, the pinch is the stretch BETWEEN them
+    # and cannot lie inside either; distances are measured from the lumen entrances (roof edges).
+    e_top, e_bot = ent if ent is not None else (0.0, float(h - 1))
+    L = max(1.0, float(e_bot - e_top))
+    c_row = 0.5 * (e_top + e_bot)
+    closed_px0 = max(P["closed_frac"] * w_ref, P["closed_min_px"], tr["sup"] + P["closed_line_px"])
+    lum = np.nan_to_num(w_cls, nan=0.0) >= closed_px0
+    lum = ndi.binary_closing(lum, structure=np.ones(max(3, int(P["closed_min_len"] * h)) | 1))
+    parts = [(a, b) for a, b in runs_of(lum) if (b - a) > wedge]
+    att = P["ent_attach"] * L
+    # the stretches that are NOT lumen: before the first part (if it does not start at the entrance),
+    # between parts, and after the last one. The pinch is the longest of them.
+    gaps = []
+    if parts:
+        if parts[0][0] > e_top + att:
+            gaps.append((float(e_top), float(parts[0][0])))
+        for (a0, b0), (a1, b1) in zip(parts, parts[1:]):
+            gaps.append((float(b0), float(a1)))
+        if parts[-1][1] < e_bot - att:
+            gaps.append((float(parts[-1][1]), float(e_bot)))
+    else:
+        gaps.append((float(e_top), float(e_bot)))
+    single = not gaps                   # one blob from entrance to entrance
+    tip_top, tip_bot = max(gaps, key=lambda g: g[1] - g[0]) if gaps else (float(e_top), float(e_top))
+    is_closed = cls in ("PINCHED", "TOUCHDOWN")
+    n_parts = len(parts)
+    ext = pick_pockets(ext, lum, L) if (ext is not None and is_closed and regime != "plug") else None
+    if ext is not None:
+        rt, rb = float(ext[0]), float(ext[1])
+        if path_block is not None:
+            # Wide design with no free path: the two port pockets ARE the lumen parts, and the flood
+            # decides both ends. The tracker cannot: it bridges a roof-down stretch (one blob), or it
+            # follows the faint side lines of the cell past the end of a short pocket, which put the
+            # upper end of the pinch inside the roof-down stretch (R3 H5 W110 ML7-10, channels 2-3).
+            # The tracker still arbitrates which flood threshold to trust (pick_pockets).
+            tip_top, tip_bot, single = rt, rb, False
+            n_parts = 2
+        elif single:
+            pass
+        elif (tip_top <= e_top and rt >= tip_bot) or (tip_bot >= e_bot and rb <= tip_top):
+            # the stretch the tracker left out lies at an entrance and inside a port pocket: it is
+            # the flare of the pocket, which the tracker did not follow, not a pinch
+            tip_top, tip_bot = rt, rb
+        else:
+            if tip_top < rt < tip_bot:
+                tip_top = rt
+            if tip_top < rb < tip_bot:
+                tip_bot = rb
+    tip_top, tip_bot = float(np.clip(tip_top, e_top, e_bot)), float(np.clip(tip_bot, e_top, e_bot))
+    pm = dict(n_lumen_parts=n_parts, tip_top_row=np.nan, tip_bot_row=np.nan,
+              ent_to_pinch_top_frac=np.nan, ent_to_pinch_bot_frac=np.nan, pinch_len_frac=np.nan,
+              pinch_center_offset_frac=np.nan, pinch_symmetric="",
+              neck_depth_top=np.nan, neck_pos_top_frac=np.nan, neck_row_top=np.nan,
+              neck_depth_bot=np.nan, neck_pos_bot_frac=np.nan, neck_row_bot=np.nan,
+              w_center_frac=np.nan, bulge_excess_frac=np.nan, bulge=False,
+              ent_top_row=float(e_top), ent_bot_row=float(e_bot), lumen_len_px=L,
+              part_at_top=bool(parts) and parts[0][0] <= e_top + att,
+              part_at_bot=bool(parts) and parts[-1][1] >= e_bot - att)
+    has_stretch = is_closed and not single and tip_bot > tip_top
+    if has_stretch:
+        off = (0.5 * (tip_top + tip_bot) - c_row) / L
+        pm.update(tip_top_row=tip_top, tip_bot_row=tip_bot,
+                  ent_to_pinch_top_frac=(tip_top - e_top) / L, ent_to_pinch_bot_frac=(e_bot - tip_bot) / L,
+                  pinch_len_frac=(tip_bot - tip_top) / L, pinch_center_offset_frac=off,
+                  pinch_symmetric=bool(abs(off) <= P["sym_tol"]))
+        if cls == "TOUCHDOWN" and path_block is not None:
+            roof_down_frac = float(np.clip((tip_bot - tip_top) / n_core, P["touchdown_class_frac"], 1.0))
+    if cls in ("FORMED", "NECKED"):
+        f_e = P["ent_flare"] * L
+        halves_rows = (("top", int(e_top + f_e), int(c_row)), ("bot", int(c_row), int(e_bot - f_e)))
+        mins = {}
+        w_open = np.where(np.nan_to_num(w_cls, nan=0.0) >= closed_px0, w_cls, np.nan)   # the channel is open: zeros are bookkeeping
+        for nm, a, b in halves_rows:
+            seg = w_open[max(0, a):max(0, b)]
+            if seg.size and np.isfinite(seg).any():
+                i = int(np.nanargmin(seg))
+                mins[nm] = float(seg[i])
+                row = max(0, a) + i
+                pm["neck_depth_" + nm] = float(np.clip(1.0 - seg[i] / w_ref, 0.0, 1.0))
+                pm["neck_row_" + nm] = float(row)
+                pm["neck_pos_" + nm + "_frac"] = float((row - e_top) / L if nm == "top" else (e_bot - row) / L)
+        ca, cb = int(c_row - 0.1 * L), int(c_row + 0.1 * L)
+        seg = w_open[max(0, ca):max(0, cb)]
+        if seg.size and np.isfinite(seg).any():
+            wc_ = float(np.nanmedian(seg))
+            pm["w_center_frac"] = wc_ / w_ref
+            if len(mins) == 2:
+                pm["bulge_excess_frac"] = (wc_ - max(mins.values())) / w_ref
+                pm["bulge"] = bool(pm["bulge_excess_frac"] >= P["bulge_min"])
+    if has_stretch:
+        defect_y = 0.5 * (tip_top + tip_bot) / h       # between the two lumen parts, never inside one
+    elif is_closed:
+        defect_y = np.nan                               # one blob (roof patch, doubled walls): no single pinch row
     elif cls == "NECKED":
-        defect_y = run_center(necked)
+        deeper = max(("top", "bot"), key=lambda nm: (pm["neck_depth_" + nm] if np.isfinite(pm["neck_depth_" + nm]) else -1))
+        defect_y = pm["neck_row_" + deeper] / h if np.isfinite(pm["neck_row_" + deeper]) else run_center(necked)
     else:
         defect_y = np.nan
     if not has_port and cls != "NOT_FORMED":
@@ -1079,7 +1241,7 @@ def classify_channel(tr, h, w_ref, arc, w_exp, blob=None, R_full=None, W_design=
                 w_min=w_min, w_min_frac=w_min_frac, w_min_y=w_min_y, closed_len_frac=closed_len_frac,
                 necked_len_frac=necked_len_frac, defect_y=defect_y, open_len_frac=f_raw,
                 channel_confidence=chan_conf, longest_fill=longest_fill, blind=blind, regime=regime,
-                roof_down_frac=roof_down_frac, **halves)
+                roof_down_frac=roof_down_frac, **halves, **pm)
 
 
 def wall_span(tr, present, h):
@@ -1124,6 +1286,285 @@ def roof_front_rows(tr, R_full, arc, blob, h, flare, present):
         else:
             mask[flare:y0] = True
     return mask
+
+
+def lumen_path(line, arc, tr, xc, h, w_exp):
+    """Is there a way through the channel from one port to the other without crossing a dark outline?
+
+    An open channel is a corridor between two walls. Where the roof rests on the floor the contact
+    line closes the corridor: the open pocket at each port ends at a front (a funnel, a tongue, a
+    bell), and no free path joins the two ports. The test floods the free space of the channel cell
+    from a seed just inside each port and asks whether the two floods meet. Dark outlines above
+    P['path_tau'] are barriers (specks removed, small gaps sealed); the cell sides are barriers too,
+    so a path cannot leave the channel and come back.
+
+    Returns (connected, reach_top, reach_bot): the last row reached from the top port and the first
+    row reached from the bottom port (rows of the device); between them the roof is down."""
+    m = int(P["path_margin"] * h)
+    return _path_flood(line, arc, tr, xc, h, w_exp, P["path_tau"], m, h - m)[:3]
+
+
+def pocket_extents(line, arc, tr, xc, h, w_exp, e_top, e_bot):
+    """Candidates for where the open pocket at each port ends. The flood of lumen_path is repeated
+    from seeds just inside the two entrances with the outline threshold lowered step by step
+    (P['extent_taus']); a faint contact line that leaks at the strict threshold usually holds at a
+    looser one. Returns one tuple per threshold at which the two floods stay apart, strict first:
+    (last row of the top pocket, first row of the bottom pocket, last row of the top pocket's
+    outline, first row of the bottom pocket's outline), or None. pick_pockets() chooses among them."""
+    L = max(1.0, float(e_bot - e_top))
+    m_top, m_bot = int(e_top + 0.03 * L), int(e_bot - 0.03 * L)
+    cands = []
+    for tau in P["extent_taus"]:
+        ok, rt, rb, ot, ob = _path_flood(line, arc, tr, xc, h, w_exp, tau, m_top, m_bot)
+        if not ok:
+            cands.append((rt, rb, ot, ob))
+    return cands or None
+
+
+def pick_pockets(cands, lum, L):
+    """Choose the pocket ends among the candidates of pocket_extents(): (end of the top pocket,
+    start of the bottom pocket), or None.
+
+    The strictest threshold whose floods do not leak wins. A flood has leaked when it crosses the
+    other one, or when a looser threshold ends a pocket much earlier (P['leak_jump']) and the
+    tracked walls are missing over a long run (P['leak_gap']) of the stretch in dispute: a pocket
+    has walls, the roof-down stretch behind a leaking contact line has none. Where the tracked
+    walls continue through the disputed stretch, the looser threshold has cut a real lumen at a
+    speck, and the stricter one stands. `lum` marks the rows where the tracker sees a lumen."""
+    if not cands:
+        return None
+    n = len(lum)
+
+    def empty_run(a, b):
+        a, b = int(np.clip(a, 0, n)), int(np.clip(b, 0, n))
+        rr = runs_of(~lum[a:b]) if b > a else []
+        return max((q[1] - q[0] for q in rr), default=0)
+
+    for i, (rt, rb, ot, ob) in enumerate(cands):
+        if rb - rt < P["pinch_min"] * L:
+            continue                                    # the floods crossed or touch
+        if i + 1 < len(cands):
+            nrt, nrb = cands[i + 1][0], cands[i + 1][1]
+            leak = False
+            for a, b in ((nrt, rt), (rb, nrb)):         # rows this threshold adds to the top and to the bottom pocket
+                if b - a > P["leak_jump"] * L and empty_run(a, b) > P["leak_gap"] * L:
+                    leak = True
+            if leak:
+                continue
+        # a pocket often ends in a spike too thin to flood: its outline reaches farther than its
+        # interior. Use the outline ends when they lie between the two interiors and stay apart.
+        if ot is not None and ob is not None and rt <= ot < ob <= rb:
+            return float(ot), float(ob)
+        return float(rt), float(rb)
+    return None
+
+
+def _path_flood(line, arc, tr, xc, h, w_exp, tau, m, m_bot):
+    """Flood of the channel cell from a seed row m (top) and m_bot (bottom); see lumen_path."""
+    present = tr["present"]
+    span = wall_span(tr, present, h)
+    pad = max(6.0, P["path_pad"] * w_exp)
+    if span is not None and (span[1] - span[0]) >= 0.5 * w_exp:
+        xa, xb = span[0] - pad, span[1] + pad
+    else:
+        xa, xb = xc - 0.5 * w_exp - pad, xc + 0.5 * w_exp + pad
+    xa, xb = int(max(tr["x_lo"], xa)), int(min(tr["x_hi"], xb))
+    m, m_bot = int(max(0, m)), int(min(h, m_bot))
+    # the seeds must sit inside the lumen: center them on the tracked walls when there are any (the
+    # lattice position can be a fraction of the width off, and a seed outside the pocket floods the
+    # bulk around it and reports a free path)
+    seed_half = 0.2 * w_exp
+    if span is not None and (span[1] - span[0]) >= 0.3 * w_exp:
+        xc = 0.5 * (span[0] + span[1])
+        seed_half = min(seed_half, 0.25 * (span[1] - span[0]))
+    if xb - xa < 8 or m_bot - m < 10:
+        return True, h, 0, None, None
+    B = (np.maximum(line, arc)[:, xa:xb] > tau)
+    lab, n = ndi.label(B, structure=np.ones((3, 3)))
+    if n:
+        keep = np.zeros(n + 1, bool)
+        min_len = max(8.0, P["path_speck"] * w_exp)
+        for i, sl in enumerate(ndi.find_objects(lab), 1):
+            if sl is not None and max(sl[0].stop - sl[0].start, sl[1].stop - sl[1].start) >= min_len:
+                keep[i] = True
+        B = keep[lab]
+    k = int(max(5, round(P["path_seal"] * w_exp))) | 1
+    B = cv2.morphologyEx(B.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((k, k), np.uint8)) > 0
+    free = ~B
+    free[:m] = False
+    free[m_bot:] = False
+    labf, nf = ndi.label(free)                      # 4-connected: a diagonal outline still blocks
+    if nf == 0:
+        return False, m, m_bot, None, None
+    c0, c1 = int(max(0, xc - xa - seed_half)), int(min(xb - xa, xc - xa + seed_half))
+    if c1 - c0 < 2:
+        c0, c1 = 0, xb - xa
+    top_l = set(np.unique(labf[m:m + 3, c0:c1])) - {0}
+    bot_l = set(np.unique(labf[m_bot - 3:m_bot, c0:c1])) - {0}
+    if top_l & bot_l:
+        return True, h, 0, None, None
+    rows_any = lambda labels: np.where(np.isin(labf, list(labels)).any(axis=1))[0] if labels else np.array([], int)
+    rt, rb = rows_any(top_l), rows_any(bot_l)
+    reach_top = int(rt.max()) if rt.size else m
+    reach_bot = int(rb.min()) if rb.size else m_bot
+    labB, _ = ndi.label(B, structure=np.ones((3, 3)))
+
+    def outline_end(labels, top):
+        """Last (top pocket) or first (bottom pocket) row of the outline pieces that bound a flood."""
+        if not labels:
+            return None
+        near = cv2.dilate(np.isin(labf, list(labels)).astype(np.uint8), np.ones((k + 4, k + 4), np.uint8)) > 0
+        ids = np.unique(labB[near & B])
+        ids = ids[ids > 0]
+        if not ids.size:
+            return None
+        rows = np.where(np.isin(labB, ids).any(axis=1))[0]
+        rows = rows[(rows >= m) & (rows < m_bot)]
+        if not rows.size:
+            return None
+        return int(rows.max()) if top else int(rows.min())
+
+    return False, reach_top, reach_bot, outline_end(top_l, True), outline_end(bot_l, False)
+
+
+def find_entrances(N, arc, tracks, h, w, w_exp):
+    """Rows of the two lumen entrances: the roof edge at the top face and at the bottom face.
+
+    A device shows two horizontal edges near each face. The outer one is the edge of the base the
+    walls stand on; it runs across the whole device. The inner one is the edge of the roof, where
+    the lumen opens: a dark horizontal line (often two dark corners) across the mouth of each
+    channel and absent over the solid walls between channels. The channel length that matters is
+    the one between the two roof edges, so every along-channel distance is referred to them.
+
+    For each channel mouth the dark fraction of every row in the face band is taken, minus the
+    dark fraction of the same row over the walls between channels (this removes the base edge).
+    The run of rows around the darkest one, above P['ent_min'], is that channel's edge. The roof edge is one
+    straight line per face, so the device value is the median over the channels that show it, and a
+    channel where the edge did not form inherits it.
+
+    Returns dict(top=row, bot=row, det_top=[bool per track], det_bot=[...])."""
+    band = int(P["ent_band"] * h)
+    dark = ((N < P["crescent_dark"]) | (arc > P["front_tau"])).astype(np.float32)
+    chan = np.zeros(w, bool)
+    cols = []
+    for t in tracks:
+        half = 0.5 * max(w_exp, t["w_port"], 4.0) + 2
+        a, b = int(max(0, t["x"] - half)), int(min(w, t["x"] + half + 1))
+        cols.append((a, b))
+        chan[a:b] = True
+    wall = ~ndi.binary_dilation(chan, iterations=int(max(2, 0.15 * w_exp)))
+    bx = int(P["border_skip"] * w)
+    wall[:bx] = False
+    wall[w - bx:] = False
+    out = {}
+    k = int(max(3, 0.006 * h)) | 1
+    for name, rows in (("top", slice(0, band)), ("bot", slice(h - band, h))):
+        d = dark[rows]
+        ref = d[:, wall].mean(axis=1) if wall.sum() > 10 else np.zeros(d.shape[0], np.float32)
+        per = []
+        for a, b in cols:
+            if b - a < 2:
+                per.append(None)
+                continue
+            sc = ndi.uniform_filter1d(d[:, a:b].mean(axis=1) - ref, k)
+            thr = max(P["ent_min"], 0.5 * float(sc.max()))
+            rr = runs_of(sc >= thr)
+            if not rr:
+                per.append(None)
+                continue
+            i_max = int(np.argmax(sc))                          # the run that holds the darkest row
+            ra, rb_ = next((q for q in rr if q[0] <= i_max < q[1]), rr[0])
+            per.append(rows.start + 0.5 * (ra + rb_ - 1))
+        found = [q for q in per if q is not None]
+        d0 = int(P["ent_default"] * h)
+        row = float(np.median(found)) if found else float(d0 if name == "top" else h - 1 - d0)
+        out[name] = row
+        out["det_" + name] = [q is not None and abs(q - row) <= P["ent_tol"] * h for q in per]
+    return out
+
+
+def port_stub(N, line, arc, blob, tr, h, w, w_exp, e_row, e_other, top):
+    """Shape of the lumen remnant at one port of a channel whose lumen did not form there.
+
+    A channel that did not form still shows a short stub at each port: a dark cup or crescent a
+    fraction of the design width deep, shorter than the port wedge, so the wall tracker does not
+    count it as lumen. Its shape is read from the image itself: dark body pixels and dark outlines
+    in a window around the channel mouth are joined, holes are filled, and an opening removes what
+    is thinner than P['stub_open'] x the design width (cracks, the roof edge, the base edge). The
+    stub is the largest remaining piece that begins at the entrance; it is cut at the entrance row,
+    so the base outside the roof edge is not part of it. In a frame with strong surface texture
+    the joined pixels fill the window; such a piece is rejected and the stub is left unmeasured.
+
+    Returns dict(len_px, w_px, area_px, contours) or None: length from the entrance to the tip,
+    width (90th percentile of the row widths), area, and the outline for the overlay."""
+    half = P["stub_hw"] * max(w_exp, tr["w_port"], 8.0)
+    xa, xb = int(max(tr["x_lo"], tr["x"] - half, 0)), int(min(tr["x_hi"], tr["x"] + half, w))
+    tol = int(max(3, P["stub_tol"] * h))
+    far = e_row + (1 if top else -1) * P["stub_max_len"] * abs(e_other - e_row)
+    ya, yb = (int(max(0, e_row - tol)), int(far)) if top else (int(far), int(min(h, e_row + tol + 1)))
+    if xb - xa < 6 or yb - ya < 6:
+        return None
+    sl = (slice(ya, yb), slice(xa, xb))
+    body = (N[sl] < P["crescent_dark"]) | (blob[sl] > P["stub_blob"]) | (np.maximum(line[sl], arc[sl]) > P["path_tau"])
+    body = cv2.morphologyEx(body.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8)) > 0
+    body = ndi.binary_fill_holes(body)
+    k = int(max(3, round(P["stub_open"] * w_exp))) | 1
+    body = cv2.morphologyEx(body.astype(np.uint8), cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))) > 0
+    e_loc = int(round(e_row - ya))
+    if top:
+        body[:max(0, e_loc)] = False                    # outside the roof edge: the base, not the lumen
+    else:
+        body[min(body.shape[0], e_loc + 1):] = False
+    lab, n = ndi.label(body)
+    best, best_area = 0, 0
+    for i, s in enumerate(ndi.find_objects(lab), 1):
+        starts = (s[0].start <= e_loc + tol) if top else (s[0].stop >= e_loc - tol)
+        area = int((lab[s] == i).sum())
+        if starts and area > best_area:
+            best, best_area = i, area
+    if not best:
+        return None
+    m = lab == best
+    # a stub is a compact shape inside the window. A piece that runs out of the window at its far
+    # end, or spans it from side to side, is surface texture or a lumen, not a stub: not measured.
+    runs_out = m[-1].any() if top else m[0].any()
+    if runs_out or (m[:, 0].any() and m[:, -1].any()):
+        return None
+    rows = np.where(m.any(axis=1))[0]
+    wid = m.sum(axis=1)
+    tip = (rows.max() if top else rows.min()) + ya
+    cs, _ = cv2.findContours(m.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    return dict(len_px=float(abs(tip - e_row)), w_px=float(np.percentile(wid[wid > 0], 90)), area_px=float(best_area),
+                contours=[c[:, 0, :] + np.array([xa, ya]) for c in cs])
+
+
+def wall_companions(line, tr, h, w_exp):
+    """Length of the longest dark line that runs beside a tracked wall, as a fraction of the length.
+
+    A thin roof that rests on the floor over the middle of a wide channel leaves a narrow open
+    sliver along each side wall. From above each wall then shows as two parallel lines a few
+    percent of the width apart (the wall and the contact line), with nothing between the two
+    slivers. An open channel shows one line per wall. The search band reaches P['comp_band'] x the
+    design width to either side of each tracked wall, without the wall line itself."""
+    ys = np.arange(h)
+    band = int(max(6, round(P["comp_band"] * w_exp)))
+    skip = int(tr["sup"]) + 3
+    B = line > P["path_tau"]
+    best = 0.0
+    m = int(P["front_margin"] * h)
+    for path in (tr["xL"], tr["xR"]):
+        strip = np.zeros((h, 2 * band + 1), bool)
+        for d in range(-band, band + 1):
+            if abs(d) <= skip:
+                continue
+            xs = np.clip(path + d, 0, line.shape[1] - 1)
+            strip[:, d + band] = B[ys, xs]
+        strip[:m] = False
+        strip[h - m:] = False
+        lab, n = ndi.label(strip, structure=np.ones((3, 3)))
+        for sl in ndi.find_objects(lab):
+            best = max(best, (sl[0].stop - sl[0].start) / float(h))
+    return best
 
 
 def touchdown(line, arc, tr, h):
@@ -1242,6 +1683,77 @@ def enforce_count(channels, k, pitch, w, w_exp, faces):
     return out
 
 
+def wide_lattice(N, line, arc, channels, k, pitch, pitch_exp, faces, h, w, w_exp):
+    """Place the k channels of a wide design on the lattice that best fits the port pockets.
+
+    When the roof of a wide channel is down, its ports are not crescents but open pockets (bells,
+    funnels) whose outlines the port detector splits into fragments, and the lattice phased on such
+    fragments can sit a fraction of a pitch off (review round 2: "wrong locate"). Two cues survive
+    a collapsed roof. (1) Each pocket is a patch of dark outline at a face, as wide as the channel:
+    the dark fraction of the two face bands, averaged over a channel-wide window, peaks at each
+    channel center. (2) The roof thickness steps from one channel to the next along a straight line
+    midway between them, which shows as a thin dark line over the full length. The lattice (first
+    center, pitch) that maximizes pocket evidence at the k centers plus step-line evidence at the
+    k-1 midpoints is compared with the channels found from the ports; it replaces them only when
+    it scores clearly better and actually differs (P['lat_gain'], P['lat_shift']).
+
+    Returns (channels, note)."""
+    if not k or k < 2 or pitch_exp is None:
+        return channels, ""
+    band = int(P["lat_band"] * h)
+    dark = ((N < P["crescent_dark"]) | (np.maximum(line, arc) > P["front_tau"])).astype(np.float32)
+    ev = np.zeros(w, np.float32)
+    cen = dark[int(0.35 * h):int(0.65 * h)].mean(axis=0)     # what is dark at mid-length too is a wall or a frame edge, not a pocket
+    for sl in (slice(0, band), slice(h - band, h)):
+        sc = dark[sl].mean(axis=0) - cen
+        ev += np.clip(sc - np.median(sc), 0, None)
+    Eb = ndi.uniform_filter1d(ev, int(max(5, round(w_exp))) | 1, mode="constant")
+    Eb = Eb / max(float(Eb.max()), 1e-6)
+    mid = (line[int(0.25 * h):int(0.75 * h)] > P["lat_line_tau"]).mean(axis=0).astype(np.float32)
+
+    def score(xs, pc):
+        xs = np.asarray(xs, float)
+        if xs.min() < P["lat_edge"] * w_exp or xs.max() > w - 1 - P["lat_edge"] * w_exp:
+            return -1.0
+        s1 = float(Eb[np.clip(np.round(xs).astype(int), 0, w - 1)].sum())
+        r = int(max(2, round(0.03 * pc)))
+        s2 = 0.0
+        for xm in 0.5 * (xs[1:] + xs[:-1]):
+            a, b = int(max(0, xm - r)), int(min(w, xm + r + 1))
+            s2 += float(mid[a:b].max()) if b > a else 0.0
+        return s1 + P["lat_mid_weight"] * s2
+
+    # the pitch read from the ports spreads 0.8-1.25 x the design pitch across frames (scale bar, wall width)
+    cand_p = [pitch_exp * f for f in np.linspace(1 - P["lat_pitch_tol"], 1 + P["lat_pitch_tol"], 41)]
+    best, best_s = None, -1.0
+    for pc in cand_p:
+        span = (k - 1) * pc
+        for x0 in np.arange(P["lat_edge"] * w_exp, w - 1 - P["lat_edge"] * w_exp - span, 2.0):
+            xs = x0 + pc * np.arange(k)
+            sc = score(xs, pc)
+            if sc > best_s:
+                best, best_s = (xs, pc), sc
+    if best is None:
+        return channels, ""
+    xs_new, p_new = best
+    xs_old = np.array(sorted(c["x"] for c in channels), float)
+    s_old = score(xs_old, pitch or pitch_exp) if len(xs_old) == k else -1.0
+    shift = float(np.max(np.abs(xs_new - xs_old))) / p_new if len(xs_old) == k else 9.9
+    note = f"lattice fit {best_s:.2f} vs ports {s_old:.2f}, shift {shift:.2f} pitch"
+    if os.environ.get("TV_DEBUG"):
+        print("   wide_lattice:", note, "new", [round(x) for x in xs_new], "old", [round(x) for x in xs_old])
+    if best_s < P["lat_gain"] * max(s_old, 0.0) or shift < P["lat_shift"] or best_s < P["lat_min_score"] * k:
+        return channels, note + " (kept)"
+    out = []
+    for x in xs_new:
+        near = [[q for q in f_ if abs(q["x"] - x) < 0.5 * w_exp] for f_ in faces]
+        top = max(near[0], key=lambda q: q["mass"]) if near[0] else None
+        bot = max(near[1], key=lambda q: q["mass"]) if near[1] else None
+        out.append(dict(top=top, bot=bot, x=float(x), x_top=float(x), x_bot=float(x), w_port=float(w_exp),
+                        predicted="" if (top or bot) else "lattice"))
+    return out, note + " (replaced)"
+
+
 # ----------------------------------------------------------------------------
 # driver
 # ----------------------------------------------------------------------------
@@ -1270,6 +1782,10 @@ def process_image(path, out_dir, meta=None, save_debug=True):
     channels, walls, pitch, diag, faces = find_channels(N, line, arc, blob, h, w, w_exp, pitch_exp, n_expected)
     channels = enforce_count(channels, n_expected, pitch, w, w_exp, faces)
     diag["n_expected"] = n_expected
+    if Wd and Wd >= P["touchdown_w_px"] and n_expected:
+        channels, diag["lattice"] = wide_lattice(N, line, arc, channels, n_expected, pitch, pitch_exp, faces, h, w, w_exp)
+        if "replaced" in diag["lattice"] and len(channels) >= 2:
+            pitch = float(np.median(np.diff([c["x"] for c in channels])))
 
     # pass 1: track every channel
     tracks = []
@@ -1314,15 +1830,40 @@ def process_image(path, out_dir, meta=None, save_debug=True):
 
     # pass 2: classify + touchdown
     results = []
-    for tr in tracks:
-        cl = classify_channel(tr, h, w_ref, arc, w_exp, blob, R, W_design=Wd,
-                              has_port=bool(tr["has_top"] or tr["has_bot"]))
+    entr = find_entrances(N, arc, tracks, h, w, w_exp) if tracks else dict(top=0.0, bot=float(h - 1), det_top=[], det_bot=[])
+    for i_tr, tr in enumerate(tracks):
         td_frac, td_mask = touchdown(line, arc, tr, h)
+        lpath = lumen_path(line, arc, tr, tr["x"], h, w_exp)
+        comp = wall_companions(line, tr, h, w_exp)
+        ext = pocket_extents(line, arc, tr, tr["x"], h, w_exp, entr["top"], entr["bot"])
+        cl = classify_channel(tr, h, w_ref, arc, w_exp, blob, R, W_design=Wd,
+                              has_port=bool(tr["has_top"] or tr["has_bot"]), path=lpath, td_frac=td_frac,
+                              companion=comp, ent=(entr["top"], entr["bot"]), ext=ext)
         tr.update(cl)
+        span_ = wall_span(tr, tr["present"], h)
+        tr.update(ent_det_top=bool(entr["det_top"][i_tr]), ent_det_bot=bool(entr["det_bot"][i_tr]),
+                  x_lumen=float(0.5 * (span_[0] + span_[1])) if span_ is not None else float(tr["x"]))
+        if cl["cls"] == "TOUCHDOWN" and not np.isfinite(cl["defect_y"]) and td_mask is not None \
+                and td_frac >= P["touchdown_min_frac"]:
+            tr["defect_y"] = float(np.nonzero(td_mask)[0].mean()) / h      # the roof patch itself
+        tr.update(path_open=bool(lpath[0]), path_gap_frac=max(0, lpath[2] - lpath[1]) / h if not lpath[0] else 0.0,
+                  wall_companion_frac=comp)
         if cl["regime"] == "touchdown" and cl["cls"] in ("FORMED", "NECKED") and td_frac >= P["touchdown_patch_frac"]:
             # a bubble or patch of roof on the floor inside a wide lumen: the roof came down there
             tr["cls"], tr["roof_down_frac"] = "TOUCHDOWN", max(tr["roof_down_frac"], td_frac)
             cl = dict(cl, cls="TOUCHDOWN")
+        # port stubs: the remnant at a port where no tracked lumen part begins (both ports of a
+        # NOT_FORMED channel, the blind side of a PINCHED one)
+        for nm, top in (("top", True), ("bot", False)):
+            st = None
+            if cl["cls"] == "NOT_FORMED" or (cl["cls"] == "PINCHED" and not cl["part_at_" + nm]):
+                st = port_stub(N, line, arc, blob, tr, h, w, w_exp, entr[nm], entr["bot" if top else "top"], top)
+            tr["stub_" + nm] = st
+            L_ = max(1.0, entr["bot"] - entr["top"])
+            tr["stub_" + nm + "_len_frac"] = st["len_px"] / L_ if st else np.nan
+            tr["stub_" + nm + "_len_px"] = st["len_px"] if st else np.nan
+            tr["stub_" + nm + "_w_px"] = st["w_px"] if st else np.nan
+            tr["stub_" + nm + "_area_px"] = st["area_px"] if st else np.nan
         tr.update(touchdown_frac=td_frac, td_mask=td_mask,
                   touchdown=(cl["cls"] == "TOUCHDOWN")
                   or (td_frac >= P["touchdown_min_frac"] and cl["cls"] in ("FORMED", "NECKED", "PINCHED")))
@@ -1372,8 +1913,29 @@ def save_overlay(dev, R, results, walls, faces, info, out_png):
         if r["td_mask"] is not None and r["touchdown"]:
             yy, xx = np.nonzero(r["td_mask"])
             ax.scatter(xx[::3], yy[::3], s=1, color="yellow", alpha=0.35, linewidths=0)
-        if np.isfinite(r["defect_y"]):
-            ax.plot([r["x"]], [r["defect_y"] * h], marker="x", color="yellow", ms=9, mew=2)
+        # lumen entrances (roof edges): solid where this channel shows the edge, dotted where inherited
+        hw = 0.6 * max(info["w_exp_px"], r["w_port"], 6.0)
+        for row, seen in ((r["ent_top_row"], r["ent_det_top"]), (r["ent_bot_row"], r["ent_det_bot"])):
+            ax.plot([r["x_lumen"] - hw, r["x_lumen"] + hw], [row, row], color="#39ff14", lw=1.1, ls="-" if seen else ":")
+        xm = r["x_lumen"]
+        if np.isfinite(r["tip_top_row"]):
+            # the pinch: from the end of the top lumen part to the start of the bottom one
+            cap = 0.35 * hw
+            ax.plot([xm, xm], [r["tip_top_row"], r["tip_bot_row"]], color="yellow", lw=1.2)
+            for row in (r["tip_top_row"], r["tip_bot_row"]):
+                ax.plot([xm - cap, xm + cap], [row, row], color="yellow", lw=1.6)
+        if r["cls"] == "NECKED":
+            for nm in ("top", "bot"):
+                if np.isfinite(r["neck_row_" + nm]) and r["neck_depth_" + nm] >= 1 - P["neck_frac"]:
+                    ax.plot([xm], [r["neck_row_" + nm]], marker="x", color="yellow", ms=8, mew=1.8)
+        elif np.isfinite(r["defect_y"]):
+            ax.plot([xm], [r["defect_y"] * h], marker="x", color="yellow", ms=9, mew=2)
+        if r["bulge"]:
+            ax.plot([xm], [0.5 * (r["ent_top_row"] + r["ent_bot_row"])], marker="D", mfc="none", mec="yellow", ms=8, mew=1.6)
+        for nm in ("top", "bot"):                       # port stubs of a lumen that did not form there
+            if r["stub_" + nm]:
+                for c in r["stub_" + nm]["contours"]:
+                    ax.plot(np.r_[c[:, 0], c[0, 0]], np.r_[c[:, 1], c[0, 1]], color="#ff9f1c", lw=0.9)
         extra = ""
         if r["cls"] == "PINCHED":
             extra = f"\nclosed {100 * r['closed_len_frac']:.0f}% of L"
@@ -1387,17 +1949,37 @@ def save_overlay(dev, R, results, walls, faces, info, out_png):
             extra += f"\ntip gap {100 * r['tip_gap_frac']:.0f}% of L"
         if r["touchdown"]:
             extra += f"\ntouchdown {100 * r['touchdown_frac']:.0f}%"
+        if np.isfinite(r["ent_to_pinch_top_frac"]):
+            extra += (f"\nent-pinch T{100 * r['ent_to_pinch_top_frac']:.0f} B{100 * r['ent_to_pinch_bot_frac']:.0f}"
+                      f"\npinch {100 * r['pinch_len_frac']:.0f}, off {100 * r['pinch_center_offset_frac']:+.0f}"
+                      + (" sym" if r["pinch_symmetric"] else ""))
+        if r["cls"] in ("FORMED", "NECKED") and np.isfinite(r["neck_depth_top"]) and np.isfinite(r["neck_depth_bot"]):
+            extra += (f"\nneck T{100 * r['neck_depth_top']:.0f}@{100 * r['neck_pos_top_frac']:.0f} "
+                      f"B{100 * r['neck_depth_bot']:.0f}@{100 * r['neck_pos_bot_frac']:.0f}")
+        if r["bulge"]:
+            extra += f"\nbulge +{100 * r['bulge_excess_frac']:.0f}"
+        if r["stub_top"] or r["stub_bot"]:
+            um = info["um_per_px"]
+            st = lambda nm: (f"{r['stub_' + nm + '_len_px'] * um:.0f}x{r['stub_' + nm + '_w_px'] * um:.0f}"
+                             if r["stub_" + nm] else "-")
+            extra += f"\nstub T{st('top')}\nstub B{st('bot')}"      # two lines: narrow designs leave no room for one
         if r["channel_confidence"] == "LOW":
             extra += "\n(low confidence)"
         tag = "*" if r["predicted"] else ""
         ax.text(r["x"], -0.02 * h, f"{r['index']}{tag}\n{r['cls']}{extra}", ha="center", va="bottom",
-                fontsize=6.5, color=col, fontweight="bold")
+                fontsize=5.6, color=col, fontweight="bold")
     pitch_txt = "n/a" if info["pitch_px"] is None else f"{info['pitch_px']:.0f}"
     title = (f"{info['file']}   |   H{info['H']} W{info['W']}   |   {info['um_per_px']:.1f} um/px, "
              f"design lumen {info['w_exp_px']:.0f} px, printed reference {info['w_ref_px']:.0f} px, pitch {pitch_txt} px   |   "
              f"{info['n_channels']} channels, {info['n_walls']} walls, ports {info['diag']['port_source']}, "
              f"confidence {info['diag']['confidence']}")
-    ax.set_title(title, fontsize=8.5, pad=40)
+    legend = ("green: lumen entrances (roof edges; dotted = edge not seen in this channel, device value used)   |   "
+              "yellow bracket: pinch between the two lumen parts, x at its middle   |   "
+              "ent-pinch T/B: entrance to pinch, top and bottom part (% of lumen length); pinch: its length; off: its middle minus mid-length\n"
+              "neck T/B d@p: narrowest point of each half, d = % of the reference width lost, p = distance from that entrance (% of lumen length)"
+              "   |   diamond: bulge, mid-length wider than both half minima (+ % of reference width)"
+              "   |   orange outline, stub T/B: lumen remnant at a port where no lumen formed, length x width (um)")
+    ax.set_title(title + "\n" + legend, fontsize=6.5, pad=58)
     ax.set_xlim(0, w)
     ax.set_ylim(h, 0)
     ax.set_axis_off()
@@ -1750,6 +2332,15 @@ def summarize(rows, out_dir):
         plt.close(fig)
 
 
+def _process_one(job):
+    """Worker for --jobs: one frame, errors returned instead of raised."""
+    fp, out_dir, m, save_debug = job
+    try:
+        return fp, process_image(fp, out_dir, m, save_debug=save_debug), None
+    except Exception as e:
+        return fp, None, repr(e)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--images", default="images")
@@ -1758,6 +2349,7 @@ def main():
     ap.add_argument("--bar-mm", type=float, default=P["bar_mm"], help="physical length of the scale bar")
     ap.add_argument("--pixel-um", type=float, default=P["pixel_um"], help="printer XY pixel pitch")
     ap.add_argument("--no-debug", action="store_true")
+    ap.add_argument("--jobs", type=int, default=1, help="frames processed in parallel (default 1)")
     ap.add_argument("--tags", default=os.path.join(HERE, "frame_tags.csv"),
                     help="CSV of (pattern, print_mode) rows; frames are pooled per print mode")
     args = ap.parse_args()
@@ -1768,6 +2360,7 @@ def main():
     files = sorted(glob.glob(os.path.join(args.images, "**", "*.jp*g"), recursive=True)
                    + glob.glob(os.path.join(args.images, "**", "*.png"), recursive=True))
     rows = []
+    jobs = []
     for fp in files:
         fn = os.path.basename(fp)
         m = meta.get(fn, {})
@@ -1776,12 +2369,20 @@ def main():
             continue
         if args.only and args.only not in fn:
             continue
-        try:
-            info, results = process_image(fp, args.out, m, save_debug=not args.no_debug)
-        except Exception as e:
-            print(f"FAILED {fn}: {e!r}")
-            rows.append(dict(file=fn, error=repr(e)))
+        jobs.append((fp, args.out, m, not args.no_debug))
+    if args.jobs > 1 and len(jobs) > 1:
+        import multiprocessing
+        pool = multiprocessing.Pool(min(args.jobs, len(jobs)))
+        done = pool.imap(_process_one, jobs, chunksize=1)     # in file order
+    else:
+        pool, done = None, map(_process_one, jobs)
+    for fp, res, err in done:
+        fn = os.path.basename(fp)
+        if res is None:
+            print(f"FAILED {fn}: {err}")
+            rows.append(dict(file=fn, error=err))
             continue
+        info, results = res
         summary = ", ".join(f"{r['index']}:{r['cls'][:4]}" + (f"({100 * r['closed_len_frac']:.0f}%)" if r["cls"] == "PINCHED" else "")
                             + (f"({100 * r['roof_down_frac']:.0f}%)" if r["cls"] == "TOUCHDOWN" else "")
                             + ("+TD" if r["touchdown"] else "") for r in results)
@@ -1794,7 +2395,7 @@ def main():
                     pitch_px=fmt(info["pitch_px"], 1), n_walls=info["n_walls"],
                     port_source=info["diag"]["port_source"], device_confidence=info["diag"]["confidence"],
                     print_mode=print_mode_of(fn, tags), w_ref_um=fmt(info["w_ref_px"] * info["um_per_px"], 1),
-                    note=info["diag"].get("note", ""))
+                    note=info["diag"].get("note", ""), lattice_note=info["diag"].get("lattice", ""))
         um = info["um_per_px"]
         for r in results:
             rows.append(dict(base, channel=r["index"], x_frac=fmt(r["x_frac"]), predicted=r["predicted"],
@@ -1806,6 +2407,30 @@ def main():
                              defect_y_frac=fmt(r["defect_y"]), blind=r["blind"], channel_confidence=r["channel_confidence"],
                              touchdown=r["touchdown"], touchdown_frac=fmt(r["touchdown_frac"]),
                              regime=r["regime"], roof_down_frac=fmt(r["roof_down_frac"]),
+                             path_open=r["path_open"], path_gap_frac=fmt(r["path_gap_frac"]),
+                             wall_companion_frac=fmt(r["wall_companion_frac"]),
+                             entrance_top_frac=fmt(r["ent_top_row"] / info["device_h_px"]),
+                             entrance_bot_frac=fmt(r["ent_bot_row"] / info["device_h_px"]),
+                             entrance_seen_top=r["ent_det_top"], entrance_seen_bot=r["ent_det_bot"],
+                             lumen_len_um=fmt(r["lumen_len_px"] * um, 0), n_lumen_parts=r["n_lumen_parts"],
+                             ent_to_pinch_top_frac=fmt(r["ent_to_pinch_top_frac"]),
+                             ent_to_pinch_top_um=fmt(r["ent_to_pinch_top_frac"] * r["lumen_len_px"] * um, 0),
+                             ent_to_pinch_bot_frac=fmt(r["ent_to_pinch_bot_frac"]),
+                             ent_to_pinch_bot_um=fmt(r["ent_to_pinch_bot_frac"] * r["lumen_len_px"] * um, 0),
+                             pinch_len_frac=fmt(r["pinch_len_frac"]),
+                             pinch_len_um=fmt(r["pinch_len_frac"] * r["lumen_len_px"] * um, 0),
+                             pinch_center_offset_frac=fmt(r["pinch_center_offset_frac"]),
+                             pinch_symmetric=r["pinch_symmetric"],
+                             neck_depth_top=fmt(r["neck_depth_top"]), neck_pos_top_frac=fmt(r["neck_pos_top_frac"]),
+                             neck_depth_bot=fmt(r["neck_depth_bot"]), neck_pos_bot_frac=fmt(r["neck_pos_bot_frac"]),
+                             w_center_frac=fmt(r["w_center_frac"]), bulge_excess_frac=fmt(r["bulge_excess_frac"]),
+                             bulge=r["bulge"],
+                             stub_top_len_frac=fmt(r["stub_top_len_frac"]), stub_top_len_um=fmt(r["stub_top_len_px"] * um, 0),
+                             stub_top_w_um=fmt(r["stub_top_w_px"] * um, 0),
+                             stub_top_area_um2=fmt(r["stub_top_area_px"] * um * um, 0),
+                             stub_bot_len_frac=fmt(r["stub_bot_len_frac"]), stub_bot_len_um=fmt(r["stub_bot_len_px"] * um, 0),
+                             stub_bot_w_um=fmt(r["stub_bot_w_px"] * um, 0),
+                             stub_bot_area_um2=fmt(r["stub_bot_area_px"] * um * um, 0),
                              w_min_um=fmt(r["w_min"] * um, 1),
                              w_base_top_px=fmt(r["w_base_top"], 1), w_base_top_um=fmt(r["w_base_top"] * um, 1),
                              w_inner_top_px=fmt(r["w_inner_top"], 1), taper_top=fmt(r["taper_top"]),
@@ -1818,6 +2443,9 @@ def main():
         if not results:
             rows.append(dict(base, channel=0, cls="NO_PORTS_FOUND",
                              error=f"{info['n_walls']} wall lines, no aligned port pair: treat all cells as NOT_FORMED"))
+    if pool is not None:
+        pool.close()
+        pool.join()
     csv_path = os.path.join(args.out, "channel_results.csv")
     if rows and args.only and os.path.exists(csv_path):
         done = {r["file"] for r in rows}

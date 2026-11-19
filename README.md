@@ -3,7 +3,9 @@
 > **Status: under active development.** The preprint (22 September 2026)
 > describes an earlier version with four classes; the `TOUCHDOWN` class, the
 > closure regimes and the count enforcement were added after an expert review
-> in October 2026. Expect further changes.
+> in October 2026. A second review round (November 2026) added the wide-design
+> rule (a port-to-port path test, doubled walls) and the pocket-based lattice
+> fit. Expect further changes.
 
 Python program that looks at a top-view micrograph of a 3D-printed
 *printability device* (a row of parallel enclosed channels running from one face
@@ -32,17 +34,118 @@ Two things close a channel, and cross-sections tell them apart: in narrow
 channels a uniform plug of cured resin joins the side walls; in wide channels
 the roof sags onto the floor. From above both look like a lumen that stops. The
 program decides by design width (`regime` column): at W <= 25 printer px a
-closure is a plug (`PINCHED`), at W >= 70 px it is the roof (`TOUCHDOWN`), and in
+closure is a plug (`PINCHED`), at W >= 50 px it is the roof (`TOUCHDOWN`), and in
 between the lumen ends decide: tips that taper to a point (inner/base width
 below 0.5) mean a plug, blunt ends mean the roof came down. These bounds are
-the `plug_w_px`, `touchdown_w_px` and `plug_taper` parameters and came from an
-expert review of 242 frames (October 2026).
+the `plug_w_px`, `touchdown_w_px` and `plug_taper` parameters and came from two
+expert reviews of 242 frames (October and November 2026).
+
+A wide design (W >= `touchdown_w_px`) needs its own rule. When its roof comes
+down, the side walls vanish from the top view and only an open pocket remains
+at each port, closed by a curved contact line, so a wall tracker follows
+contact lines instead of walls. The program therefore calls a wide channel open
+only on positive evidence, and `TOUCHDOWN` otherwise:
+
+1. a free path joins the two ports without crossing a dark outline
+   (`path_open`; when it is blocked, `path_gap_frac` is the stretch between the
+   two pockets),
+2. both walls were followed over at least 60% of the length between the port
+   flares (`open_wall_min`),
+3. no closed outline inside the lumen covers 5% of its area or more
+   (`touchdown_patch_frac`), and
+4. no second dark line runs beside a wall for 40% of the length or more
+   (`wall_companion_frac` against `comp_min`). Such a doubled wall is a thin
+   roof lying on the floor between two open slivers along the walls.
+
+A neck with a free path through it stays `NECKED`, however narrow it is.
 
 Also reported: narrowest width and its position, necked fraction, defect
 position, `touchdown_frac` (area enclosed by an inner closed outline inside an
 open lumen, a bubble or a patch of roof on the floor), and channel/device
-confidence (`LOW` for a cell placed without any visible port or classified
-across a long bridged gap).
+confidence (`LOW` for a cell placed without any visible port, classified
+across a long bridged gap, or called `TOUCHDOWN` with walls partly followed and
+no contact line found).
+
+### Entrance-to-pinch measurements
+
+A device shows two horizontal edges near each face. The outer edge belongs to
+the base on which the walls stand and runs across the whole device. The inner
+edge is the edge of the roof, where the lumen opens: a dark line across the
+mouth of each channel that is absent over the solid walls between channels.
+The program takes that inner edge as the *lumen entrance* and measures every
+distance along the channel from it (`entrance_top_frac`, `entrance_bot_frac`,
+`lumen_len_um`). The roof edge is one straight line per face, so the device
+value is the median over the channels that show it; a channel whose edge did
+not form inherits it (`entrance_seen_top`, `entrance_seen_bot` are then
+`False`).
+
+The lumen of a closed channel is in parts. The pinch is the longest stretch
+that is not lumen (between two parts, or between a part and the far entrance),
+so it can never lie inside a part. In a wide design with no free path the two
+lumen parts are the port pockets, and both ends of the pinch come from the
+flood of the path test, repeated at looser outline thresholds (`extent_taus`)
+until the two pockets separate. The tracked walls do not set those ends,
+because the tracker can follow the faint side lines of the channel cell past
+the end of a short pocket. The tracked walls do decide which threshold to
+trust. When a looser threshold ends a pocket more than 15% of the lumen length
+earlier (`leak_jump`), the longer pocket stands only if the tracked walls
+continue through the disputed stretch; a run without walls longer than 8% of
+the lumen length (`leak_gap`) means that the flood leaked through a faint
+contact line. The pockets also replace a stretch that the tracker left out at
+an entrance when that stretch lies inside a pocket, because it is then the
+flare of the pocket and not a pinch. Where a pocket ends in a spike, the end is the tip of the spike,
+so the x at the middle of the bracket marks the middle of the roof-down
+stretch and not the spike. Reported for
+`PINCHED` and `TOUCHDOWN` channels, as fractions of the lumen length and in
+micrometers:
+
+| Column | Meaning |
+|---|---|
+| `ent_to_pinch_top_frac`, `ent_to_pinch_bot_frac` | distance from the top and from the bottom entrance to the pinch |
+| `pinch_len_frac` | length of the pinch |
+| `pinch_center_offset_frac` | middle of the pinch minus mid-length (positive toward the bottom face) |
+| `pinch_symmetric` | `True` when that offset is within 5% of the lumen length (`sym_tol`) |
+| `n_lumen_parts` | number of separate lumen parts |
+
+A closed channel whose lumen is one blob (a roof patch inside it, or doubled
+walls) has no pinch stretch; the marker then sits on the patch.
+
+For `FORMED` and `NECKED` channels the two halves are measured separately,
+because the two narrowings rarely mirror each other: `neck_depth_top` and
+`neck_depth_bot` give the fraction of the reference width lost at the
+narrowest point of each half, and `neck_pos_top_frac` and `neck_pos_bot_frac`
+its distance from that half's entrance. The first 7% of the lumen length at
+each entrance is skipped (`ent_flare`, the port flare). `w_center_frac` is the
+median width of the middle fifth of the lumen over the reference width. A
+channel is `bulge = True` when that width exceeds both half minima by at least
+10% of the reference width (`bulge_min`); `bulge_excess_frac` is the excess.
+
+A channel that did not form still leaves a short *stub* at each port: a dark
+cup or crescent shorter than the port wedge, which the wall tracker therefore
+does not count as lumen. The program records the shape of that stub at both
+ports of a `NOT_FORMED` channel and at the closed port of a `PINCHED` channel
+that is open from one port only. It joins the dark pixels and the dark outlines
+in a window around the channel mouth, fills the holes, removes everything
+thinner than 12% of the design width (`stub_open`: cracks, the roof edge, the
+base edge), and keeps the largest piece that begins at the entrance. The search
+covers the first 25% of the lumen length (`stub_max_len`). A piece that runs
+past that limit, or that spans the search window from side to side, is surface
+texture or a lumen and not a stub, and the program leaves it unmeasured.
+`stub_top_len_frac` and `stub_top_len_um` give the length from the entrance to
+the tip, `stub_top_w_um` the width (90th percentile of the row widths, so the
+flare at the mouth counts) and `stub_top_area_um2` the area; the `stub_bot_*`
+columns hold the same for the bottom port. At a port where a tracked lumen part
+begins, `ent_to_pinch_*` already gives the length of that part and the stub
+columns stay empty.
+
+The overlay draws all of this so that it can be checked by eye: green lines at
+the two entrances (dotted where inherited), a yellow bracket over the pinch
+with an x at its middle, a yellow x on each narrowing of 25% or more in an open
+channel, a yellow diamond at mid-length for a bulge, and an orange outline
+around each stub. The second title line
+of every overlay explains the abbreviations in the channel labels.
+
+### Lumen geometry by half
 
 Lumen geometry per channel (columns `*_top` for the half that starts at the top
 face of the frame, `*_bot` for the half that ends at the bottom face; a
@@ -71,12 +174,19 @@ of their open width), not the design width.
    gives the count, the lattice is refit on the port-bearing channels and the
    window of that many consecutive slots with the most port evidence is kept, so
    an extra cell at the frame edge is dropped and a missed channel keeps its number.
+   For wide designs with a known count, a second lattice is fitted to the port
+   pockets (dark outline in the two face bands, averaged over a channel-wide
+   window) and to the straight lines midway between channels where the roof
+   thickness steps. It replaces the port-based channels only when it scores at
+   least 15% better and moves a channel by at least 15% of the pitch
+   (`lat_gain`, `lat_shift`); `lattice_note` in `channel_results.csv` records
+   the two scores and the decision.
 6. Dynamic-programming tracking of the left and right wall of each channel, both orders.
 7. Presence (continuity of the tracked line; runs shorter than the port wedge do
    not count), gap logic (tapering tips, a dark cap, or in narrow designs a gap
    longer than 12% of the length mean the lumen is closed there; shorter gaps are
-   tracking dropouts and are bridged), reference width, classification by regime,
-   touchdown.
+   tracking dropouts and are bridged), reference width, classification by regime
+   (wide designs by the four-part rule above), touchdown.
 
 All tunables are in the `P` dictionary at the top of
 `topview_channel_pipeline.py`, one comment each.
@@ -108,7 +218,8 @@ matched to the ML range are flagged in `ml_note` and left out of the map.
 
 Options: `--only <substring>` runs matching files, `--bar-mm` and `--pixel-um`
 override the scale-bar length and the printer pixel pitch (32 um, Asiga Ultra),
-`--no-debug` skips the overlays, `--tags <csv>` points at a frame-tag file
+`--no-debug` skips the overlays, `--jobs <n>` processes n frames in parallel,
+`--tags <csv>` points at a frame-tag file
 (default `frame_tags.csv` next to the script): rows of `pattern,print_mode`,
 where `pattern` is a regular expression on the file name. Frames of different
 print modes (for example the Asiga transparency mode on or off) are pooled and
@@ -127,20 +238,31 @@ open-channel outcomes side by side) and `example_H10_W100_2.jpg`.
 ## Reviewing the calls
 `make_review_folder.py <folder> <results dirs...>` builds a small folder for a
 reviewer: one JPEG overlay per frame, a spreadsheet with one row per frame
-(what the code decided, and columns for what was right and wrong, by channel
-number) and a README. `score_against_review.py review_sheet.xlsx <results
-dirs...>` turns the filled-in sheet into a per-channel truth table and scores
+(what the code decided, columns for what was right and wrong by channel
+number, and a column for entrance and pinch marks that are off) and a README.
+`score_against_review.py review_sheet.xlsx <results dirs...>` turns the filled-in sheet into a per-channel truth table and scores
 both the decisions the reviewer saw and a new results folder against it, so a
-code change can be measured before the next review round.
+code change can be measured before the next review round. It also counts the
+channels the reviewer called mislocated or undetected, which it scores apart
+from the class. `--round1` selects the sentence parser and the looser touchdown
+match that the October 2026 scores used.
 
 ## Known limitations
-The plug-versus-touchdown decision at W30 to W60 rests on the shape of the lumen
-ends and is the least certain call; faint walls in wide channels lower the
-confidence rather than the class; touchdown patches need a closed inner outline
-(air bubbles count too); a misread scale bar shifts every micrometer value of
-that frame (the lattice no longer depends on it when the file name carries the
-channel count); the thresholds were set against one reviewer's calls on 242
-frames of one resin.
+The plug-versus-touchdown decision at W30 and W40 rests on the shape of the
+lumen ends and is the least certain call. In a wide design, an open lumen whose
+walls are too faint to follow is called `TOUCHDOWN` with low confidence, and a
+trapped bubble that fills the lumen from wall to wall passes for an open
+channel. At W5 to W20 a stub shorter than a few percent of the length is easily
+missed, and in frames with strong surface texture the tracker can follow the
+texture and report a stub that is not there. The channel lattice of narrow
+designs still rests on the ports alone. The entrance, pinch and stub
+measurements have not yet been checked against a reviewer; a pocket that ends in a thin
+spike is measured to where the spike becomes too thin to resolve, and a channel
+placed off its lumen gives meaningless distances. A misread scale bar shifts every
+micrometer value of that frame; the lattice does not depend on it when the file
+name carries the channel count. The thresholds were set against one reviewer's
+calls on 242 frames of one resin, so the agreement figures are not an
+independent accuracy estimate.
 
 ## License
 MIT, see [`LICENSE`](LICENSE).
