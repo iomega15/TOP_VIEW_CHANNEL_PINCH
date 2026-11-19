@@ -68,6 +68,8 @@ P = dict(
     pixel_um=32.0,           # Asiga Ultra XY pixel pitch (PRINTER_PIXEL_SIZES[1] in the OpenSCAD)
     wall_mm=2.0,             # printability device: solid wall between channels; pitch = wall + W (measured on 7 devices, within 6%)
     pitch_tol=0.25,          # measured pitches are considered only within this fraction of the design pitch (wall 1.65-2.3 mm across devices)
+    design_post_px=40,       # printability_device.scad: a post is 40 x 40 printer px; the solid between two channels is two posts side by side
+    design_rows=4,           # printability_device.scad: a channel runs over 4 cells of two posts each -> design length = 4 x 2 x 40 px
     bar_mm=2.0,              # scale-bar length; the "0.20 mm" label on the H5 images is a 10x calibration slip
     um_per_px_default=13.5,  # used only when no scale bar is found (typical for the 1920 px frames)
     # footer / device
@@ -1193,6 +1195,7 @@ def classify_channel(tr, h, w_ref, arc, w_exp, blob=None, R_full=None, W_design=
               neck_depth_top=np.nan, neck_pos_top_frac=np.nan, neck_row_top=np.nan,
               neck_depth_bot=np.nan, neck_pos_bot_frac=np.nan, neck_row_bot=np.nan,
               w_center_frac=np.nan, bulge_excess_frac=np.nan, bulge=False,
+              narrow_max_frac=np.nan, narrow_mean_frac=np.nan, lumen_quality=np.nan, w_med_px=np.nan,
               ent_top_row=float(e_top), ent_bot_row=float(e_bot), lumen_len_px=L,
               part_at_top=bool(parts) and parts[0][0] <= e_top + att,
               part_at_bot=bool(parts) and parts[-1][1] >= e_bot - att)
@@ -1219,6 +1222,21 @@ def classify_channel(tr, h, w_ref, arc, w_exp, blob=None, R_full=None, W_design=
                 pm["neck_depth_" + nm] = float(np.clip(1.0 - seg[i] / w_ref, 0.0, 1.0))
                 pm["neck_row_" + nm] = float(row)
                 pm["neck_pos_" + nm + "_frac"] = float((row - e_top) / L if nm == "top" else (e_bot - row) / L)
+        # Narrowing of an open channel, two summaries of a width that varies along the length: the
+        # deepest point (what limits the flow) and the mean over the length between the two port
+        # flares (how much of the lumen is lost overall; rows wider than the reference count as 0,
+        # so a bulge does not cancel a neck). Both as fractions of the reference width.
+        depths = [pm["neck_depth_" + nm] for nm in ("top", "bot") if np.isfinite(pm["neck_depth_" + nm])]
+        if depths:
+            pm["narrow_max_frac"] = float(max(depths))
+        seg = w_open[max(0, int(e_top + f_e)):max(0, int(e_bot - f_e))]
+        if seg.size and np.isfinite(seg).any():
+            pm["narrow_mean_frac"] = float(1.0 - np.nanmean(np.minimum(seg / w_ref, 1.0)))
+            pm["w_med_px"] = float(np.nanmedian(seg))
+            # Lumen quality of a channel that is open end to end: 1 minus the mean distance of its
+            # width from the reference width along the length. A neck and a bulge both lower it; 1 is
+            # a lumen at the reference width from port flare to port flare.
+            pm["lumen_quality"] = float(1.0 - np.nanmean(np.minimum(np.abs(seg / w_ref - 1.0), 1.0)))
         ca, cb = int(c_row - 0.1 * L), int(c_row + 0.1 * L)
         seg = w_open[max(0, ca):max(0, cb)]
         if seg.size and np.isfinite(seg).any():
@@ -1922,6 +1940,35 @@ def process_image(path, out_dir, meta=None, save_debug=True):
                           ent_to_pinch_bot_frac=(entr["bot"] - t1) / L_, pinch_len_frac=(t1 - t0) / L_,
                           pinch_center_offset_frac=off, pinch_symmetric=bool(abs(off) <= P["sym_tol"]),
                           defect_y=0.5 * (t0 + t1) / h)
+        # length without lumen, one number for every class: 0 for a channel open end to end, the
+        # pinch for a closed one, everything but the two port stubs for one that did not form
+        if tr["cls"] in ("FORMED", "NECKED"):
+            tr["gap_len_frac"] = 0.0
+        elif tr["cls"] == "NOT_FORMED":
+            stubs = sum(float(tr["stub_" + nm + "_len_frac"]) for nm in ("top", "bot") if np.isfinite(tr["stub_" + nm + "_len_frac"]))
+            tr["gap_len_frac"] = float(np.clip(1.0 - stubs, 0.0, 1.0))
+        else:
+            tr["gap_len_frac"] = float(tr["pinch_len_frac"]) if np.isfinite(tr["pinch_len_frac"]) else np.nan
+        # Printed against design. Width: the median width of an open channel between its port flares;
+        # for a pinched channel the width of its lumen parts near the ports (after the flare). Length:
+        # entrance to entrance against the design length of the roof. Pitch: center-to-center distance
+        # of the channels against two posts plus the design width; the pitch does not depend on how
+        # far the walls cured into the lumen, so it shows the scale of the print (and of the image).
+        if tr["cls"] in ("FORMED", "NECKED"):
+            w_print = float(tr["w_med_px"])
+        elif tr["cls"] == "PINCHED":
+            wb = [float(tr[k]) for k in ("w_base_top", "w_base_bot") if np.isfinite(tr[k])]
+            w_print = float(np.mean(wb)) if wb else np.nan
+        else:
+            w_print = np.nan
+        xs_ = sorted(t["x"] for t in tracks)
+        pitch_meas = float(np.median(np.diff(xs_))) if len(xs_) >= 3 else pitch      # spacing of the final channel centers
+        px_d = P["pixel_um"] / um_per_px if np.isfinite(um_per_px) else np.nan      # one printer pixel in image px
+        len_design = P["design_rows"] * 2 * P["design_post_px"] * px_d
+        pitch_design = (2 * P["design_post_px"] + Wd) * px_d if Wd else np.nan
+        tr.update(w_print_px=w_print, w_print_over_design=w_print / w_exp if Wd else np.nan,
+                  len_over_design=float(entr["bot"] - entr["top"]) / len_design if np.isfinite(len_design) else np.nan,
+                  pitch_over_design=(pitch_meas / pitch_design) if (pitch_meas and np.isfinite(pitch_design)) else np.nan)
         tr.update(touchdown_frac=td_frac, td_mask=td_mask,
                   touchdown=(cl["cls"] == "TOUCHDOWN")
                   or (td_frac >= P["touchdown_min_frac"] and cl["cls"] in ("FORMED", "NECKED", "PINCHED")))
@@ -2247,6 +2294,88 @@ def plot_ml_map(cells, out_png, widths=None):
     plt.close(fig)
 
 
+SEQ_BLUE = ["#eef4fc", "#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"]
+
+
+def plot_value_map(cells, key, out_png, widths, title, closed_is_gray=True, partial=None, always_count=False,
+                   scale=100.0, vmax=1.0, unit="%"):
+    """W x ML map of one measured fraction (cells[key], shown in percent, mean over the replicates
+    of a cell) on a one-hue light-to-dark scale; the color saturates at 100. With closed_is_gray, a
+    cell with no value is gray and carries the letter of its class. With partial (default: same as
+    closed_is_gray), a cell in which only some replicates are open shows under its number how many
+    (open / imaged); always_count shows that count in every cell. scale, vmax and unit turn the
+    percent map into a count map (scale 1, vmax = the largest count, unit = what is counted)."""
+    partial = closed_is_gray if partial is None else partial
+    from matplotlib.colors import LinearSegmentedColormap
+    cmap = LinearSegmentedColormap.from_list("seq_blue", SEQ_BLUE)
+    panels = sorted({c["panel"] for c in cells} | set(widths or {}))
+    if not panels:
+        return
+    # fixed margins in inches (title band on top, note band below), so nothing depends on a layout engine
+    fig_h = 3.9 * len(panels) + 1.3
+    fig, axes = plt.subplots(len(panels), 1, figsize=(12.6, fig_h), squeeze=False)
+    fig.subplots_adjust(left=0.055, right=0.925, top=1 - 0.75 / fig_h, bottom=0.95 / fig_h, hspace=0.36)
+    fig.text(0.012, 1 - 0.12 / fig_h, title, ha="left", va="top", fontsize=9.5)
+    for i_pn, (ax, pn) in enumerate(zip(axes[:, 0], panels)):
+        sub = [c for c in cells if c["panel"] == pn]
+        Ws = sorted({c["W_px"] for c in sub} | set((widths or {}).get(pn, [])))
+        for x in range(len(Ws)):
+            for y in range(10):
+                ax.add_patch(plt.Rectangle((x - 0.5, y - 0.5), 1, 1, facecolor="#f2f2f2", edgecolor="white", lw=1.5))
+        for c in sub:
+            x, y = Ws.index(c["W_px"]), c["ML"] - 1
+            v = c.get(key, np.nan)
+            sub_txt = ""
+            if c["excluded"]:
+                color, txt, ink = "#d9d9d9", "–", "black"
+            elif np.isfinite(v):
+                color = cmap(float(np.clip(v / vmax, 0, 1)))
+                txt = f"{scale * v:.0f}"
+                ink = "white" if v / vmax > 0.55 else "#1a1a1a"
+                if always_count or (partial and c.get("n_open", 0) < c.get("n", 0)):
+                    sub_txt = f"{c.get('n_open', 0)}/{c.get('n', 0)}"
+            elif closed_is_gray:
+                color, txt, ink = "#8c8c8c", CLASS_LETTER[c["cls"]], "white"
+            else:
+                color, txt, ink = "#8c8c8c", "?", "white"
+            ax.add_patch(plt.Rectangle((x - 0.5, y - 0.5), 1, 1, facecolor=color, edgecolor="white", lw=1.5))
+            if sub_txt:
+                ax.text(x, y + 0.14, txt, ha="center", va="center", fontsize=6.5, color=ink)
+                ax.text(x, y - 0.24, sub_txt, ha="center", va="center", fontsize=4.6, color=ink)
+            else:
+                ax.text(x, y, txt, ha="center", va="center", fontsize=6.5, color=ink)
+        ax.set_xlim(-0.5, len(Ws) - 0.5)
+        ax.set_ylim(-0.5, 9.5)
+        ax.set_xticks(range(len(Ws)))
+        ax.set_xticklabels([str(w) for w in Ws], fontsize=7)
+        ax.set_yticks(range(10))
+        ax.set_yticklabels([str(i + 1) for i in range(10)], fontsize=7)
+        ax.set_xlabel("design channel width W (printer px, 1 px = 32 um)")
+        ax.set_ylabel("roof thickness ML (layers)")
+        ax.set_title(f"H = {pn}", loc="left", fontsize=9)
+        for sp in ax.spines.values():
+            sp.set_visible(False)
+        ax.tick_params(length=0)
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(0, scale * vmax))
+    cb = fig.colorbar(sm, cax=fig.add_axes([0.94, 0.5 - 1.3 / fig_h, 0.012, 2.6 / fig_h]))
+    cb.set_label(unit, fontsize=8)
+    if unit != "%":
+        cb.set_ticks(list(range(int(round(scale * vmax)) + 1)))
+    cb.ax.tick_params(labelsize=7)
+    cb.outline.set_visible(False)
+    if closed_is_gray:
+        note = ("gray with a letter: no value for this class (P pinched, T touchdown, X not formed)   |   "
+                + ("small k/n under a number: only k of the n imaged replicates are open, the number is their mean   |   " if partial else "")
+                + "– low-confidence device")
+    else:
+        note = "gray ?: no value could be measured   |   – low-confidence device"
+    if unit == "%":
+        note += "   |   number = mean over the replicates of the cell"
+    fig.text(0.012, 0.12 / fig_h, note, ha="left", fontsize=7)
+    fig.savefig(out_png, dpi=150)
+    plt.close(fig)
+
+
 def summarize(rows, out_dir):
     """Per-frame and per-(H, W) summaries + a class-fraction plot; with ML-named files also a
     per-(H, W, ML) table and a W x ML map in which every physical channel is counted once."""
@@ -2279,7 +2408,41 @@ def summarize(rows, out_dir):
             cells.append(dict(H_layers=Hl, panel=panel_of(Hl, m), W_px=Wd, ML=ml, cls=cls, touchdown=td,
                               excluded=not good))
             one = use[0]
+
+            def mean_of(key, sel=None):
+                vals = []
+                for r in use:
+                    if sel is None or r["cls"] in sel:
+                        try:
+                            v = float(r.get(key, ""))
+                        except (TypeError, ValueError):
+                            continue
+                        if np.isfinite(v):
+                            vals.append(v)
+                return (float(np.mean(vals)), len(vals)) if vals else (np.nan, 0)
+
+            open_cls = ("FORMED", "NECKED")
+            n_open = sum(r["cls"] in open_cls for r in use)
+            gap, n_gap = mean_of("gap_len_frac")
+            nmax, _ = mean_of("narrow_max_frac", open_cls)
+            nmean, _ = mean_of("narrow_mean_frac", open_cls)
+            # bulge: how much wider the middle is than both narrowings beside it; no bulge counts as 0
+            bl = [max(0.0, float(r["bulge_excess_frac"])) for r in use
+                  if r["cls"] in open_cls and r.get("bulge_excess_frac") not in ("", None)]
+            bulge = float(np.mean(bl)) if bl else np.nan
+            qual, _ = mean_of("lumen_quality", open_cls)
+            w_ratio, _ = mean_of("w_print_over_design")
+            len_ratio, _ = mean_of("lumen_len_over_design")
+            pitch_ratio, _ = mean_of("pitch_over_design")
+            cells[-1].update(gap=gap, narrow_max=nmax, narrow_mean=nmean, bulge=bulge, quality=qual,
+                             w_ratio=w_ratio, len_ratio=len_ratio, pitch_ratio=pitch_ratio,
+                             open_frac=n_open / len(use), n_open=n_open, n=len(use), n_rep=float(len(good)))
             ml_rows.append(dict(H_layers=Hl, print_mode=m, W_px=Wd, ML=ml, n_replicates=len(use), cls=cls,
+                                gap_len_frac_mean=fmt(gap), n_gap=n_gap, n_open=n_open,
+                                narrow_max_frac_mean=fmt(nmax), narrow_mean_frac_mean=fmt(nmean),
+                                bulge_excess_frac_mean=fmt(bulge), lumen_quality_mean=fmt(qual),
+                                open_fraction=fmt(n_open / len(use)), w_print_over_design_mean=fmt(w_ratio),
+                                lumen_len_over_design_mean=fmt(len_ratio), pitch_over_design_mean=fmt(pitch_ratio),
                                 excluded_low_confidence=not good, touchdown=td,
                                 w_min_frac=one.get("w_min_frac", ""), closed_len_frac=one.get("closed_len_frac", ""),
                                 necked_len_frac=one.get("necked_len_frac", ""), file=one["file"],
@@ -2290,6 +2453,35 @@ def summarize(rows, out_dir):
             if r.get("H_layers") not in ("", None) and r.get("W_px") not in ("", None):
                 widths.setdefault(panel_of(int(r["H_layers"]), mode(r)), set()).add(int(r["W_px"]))
         plot_ml_map(cells, os.path.join(out_dir, "channel_state_map_W_ML.png"), widths)
+        plot_value_map(cells, "gap", os.path.join(out_dir, "gap_between_lumen_parts_map_W_ML.png"), widths,
+                       "Length without lumen (% of the lumen length): the pinch between the two lumen parts; "
+                       "0 = open end to end; a channel that did not form counts everything but its port stubs",
+                       closed_is_gray=False)
+        plot_value_map(cells, "narrow_max", os.path.join(out_dir, "narrowing_deepest_map_W_ML.png"), widths,
+                       "Narrowing at the narrowest point of an open channel (% of the reference width lost)")
+        plot_value_map(cells, "narrow_mean", os.path.join(out_dir, "narrowing_mean_map_W_ML.png"), widths,
+                       "Mean narrowing of an open channel along its length (% of the reference width lost)")
+        plot_value_map(cells, "bulge", os.path.join(out_dir, "bulge_mid_length_map_W_ML.png"), widths,
+                       "Bulge of an open channel at mid-length: width of the middle minus the wider of the two "
+                       "narrowest points beside it (% of the reference width; 0 = no bulge)")
+        plot_value_map(cells, "quality", os.path.join(out_dir, "lumen_quality_map_W_ML.png"), widths,
+                       "Lumen quality of a channel open end to end: 100 minus the mean distance of its width from the "
+                       "reference width along the length (%; 100 = neither narrows nor bulges)")
+        plot_value_map(cells, "open_frac", os.path.join(out_dir, "open_fraction_map_W_ML.png"), widths,
+                       "Share of the printed channels that are open end to end (% of the replicates of a cell; "
+                       "below each number: open / imaged)", closed_is_gray=False, always_count=True)
+        plot_value_map(cells, "n_rep", os.path.join(out_dir, "replicates_map_W_ML.png"), widths,
+                       "Replicates per design: number of imaged channels that count for a cell (one per physical "
+                       "channel; channels of low-confidence devices are not counted)", closed_is_gray=False,
+                       scale=1.0, vmax=3.0, unit="replicates")
+        plot_value_map(cells, "w_ratio", os.path.join(out_dir, "width_printed_vs_design_map_W_ML.png"), widths,
+                       "Printed lumen width as % of the design width (open channels: median width along the length; "
+                       "pinched channels: width of the lumen parts near the ports)", partial=False)
+        plot_value_map(cells, "len_ratio", os.path.join(out_dir, "length_printed_vs_design_map_W_ML.png"), widths,
+                       "Printed lumen length (roof edge to roof edge) as % of the design length", closed_is_gray=False)
+        plot_value_map(cells, "pitch_ratio", os.path.join(out_dir, "pitch_printed_vs_design_map_W_ML.png"), widths,
+                       "Channel pitch (center to center) as % of the design pitch: the scale of the print and of the image, "
+                       "independent of how far the walls cured into the lumen", closed_is_gray=False)
 
     def num(v):
         try:
@@ -2486,6 +2678,15 @@ def main():
                              neck_depth_bot=fmt(r["neck_depth_bot"]), neck_pos_bot_frac=fmt(r["neck_pos_bot_frac"]),
                              w_center_frac=fmt(r["w_center_frac"]), bulge_excess_frac=fmt(r["bulge_excess_frac"]),
                              bulge=r["bulge"],
+                             gap_len_frac=fmt(r["gap_len_frac"]), narrow_max_frac=fmt(r["narrow_max_frac"]),
+                             narrow_mean_frac=fmt(r["narrow_mean_frac"]), lumen_quality=fmt(r["lumen_quality"]),
+                             w_print_um=fmt(r["w_print_px"] * um, 0),
+                             w_design_um=fmt(info["W"] * P["pixel_um"], 0) if info["W"] else "",
+                             w_print_over_design=fmt(r["w_print_over_design"]),
+                             lumen_len_design_um=fmt(P["design_rows"] * 2 * P["design_post_px"] * P["pixel_um"], 0),
+                             lumen_len_over_design=fmt(r["len_over_design"]),
+                             pitch_um=fmt(info["pitch_px"] * um, 0) if info["pitch_px"] else "",
+                             pitch_over_design=fmt(r["pitch_over_design"]),
                              stub_top_len_frac=fmt(r["stub_top_len_frac"]), stub_top_len_um=fmt(r["stub_top_len_px"] * um, 0),
                              stub_top_w_um=fmt(r["stub_top_w_px"] * um, 0),
                              stub_top_area_um2=fmt(r["stub_top_area_px"] * um * um, 0),

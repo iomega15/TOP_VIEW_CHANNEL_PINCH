@@ -170,6 +170,64 @@ meet. The *reference width*
 is the printed width (median over the device's channels of the 85th percentile
 of their open width), not the design width.
 
+### Maps over design width and roof thickness
+
+With ML-named frames the program draws one map per measured quantity, with the
+design width W on the horizontal axis and the roof thickness ML on the vertical
+axis, one panel per height and print mode. A cell holds the mean over its
+replicates (one observation per physical channel; channels of low-confidence
+devices do not count). The color runs from light to dark in one hue and
+saturates at 100. `summary_by_H_W_ML.csv` holds the same cell means.
+
+| Map (`*_map_W_ML.png`) | Quantity | Column in `channel_results.csv` |
+|---|---|---|
+| `channel_state` | class of the channel, by majority | `cls` |
+| `replicates` | number of imaged channels that count for the cell | |
+| `open_fraction` | share of the replicates that are open end to end, with the count open / imaged | |
+| `gap_between_lumen_parts` | length without lumen, % of the lumen length | `gap_len_frac` |
+| `narrowing_deepest` | width lost at the narrowest point, % of the reference width | `narrow_max_frac` |
+| `narrowing_mean` | width lost on average along the length, % of the reference width | `narrow_mean_frac` |
+| `bulge_mid_length` | width of the middle beyond both narrowings beside it, % of the reference width | `bulge_excess_frac` |
+| `lumen_quality` | 100 minus the mean distance of the width from the reference width, % | `lumen_quality` |
+| `width_printed_vs_design` | printed lumen width, % of the design width | `w_print_over_design` |
+| `length_printed_vs_design` | printed lumen length, % of the design length | `lumen_len_over_design` |
+| `pitch_printed_vs_design` | channel pitch, % of the design pitch | `pitch_over_design` |
+
+The length without lumen is 0 for a channel that is open end to end, the pinch
+for a closed channel, and everything except the two port stubs for a channel
+that did not form. The two narrowing measures, the bulge and the quality apply
+to open channels (`FORMED`, `NECKED`) and read the width between the two port
+flares. The width of an open channel varies along its length, so two numbers
+summarize the narrowing: the deepest point, which limits the flow, and the
+mean, which says how much of the lumen is affected. In the mean, a row wider
+than the reference counts as 0, so that a bulge does not cancel a neck. The
+quality counts both: it is 1 minus the mean of |width / reference - 1| along
+the length, so a lumen that neither narrows nor bulges scores 100% and both a
+neck and a bulge lower the score. In these four maps a cell without an open
+replicate is gray and carries the letter of its class, and a cell in which
+only some replicates are open shows their mean with the count (open / imaged)
+under it.
+
+The last three maps compare the print with the design. The printed width is
+the median width of an open channel, or the width of the lumen parts near the
+ports for a pinched channel. The printed length runs from one lumen entrance
+to the other. The pitch is the center-to-center distance of the channels; it
+does not depend on how far the walls cured into the lumen, so it shows the
+scale of the print and of the image. The design dimensions come from the
+defaults of the device generator (`printability_device.scad`): a post of
+40 x 40 printer pixels (`design_post_px`), two posts between neighboring
+channels, and a channel that runs over 4 cells of two posts each
+(`design_rows`), which gives 2.56 mm of solid between channels and a channel
+10.24 mm long at 32 um per pixel. Change the two parameters if a device was
+printed with other values. On the 242 frames of the reviewed set the pitch is
+87% to 97% of the design pitch, one value per imaging session, and the lumen
+length follows it about two points lower. A ratio that changes with the
+imaging session points to the scale of the image more than to the print, and
+the images alone cannot tell the two apart; a caliper measurement of one device
+can. The printed width is not a fixed fraction of the design width: at a
+height of 5 layers the thinnest roof prints at about 80% to 95% of it and
+thicker roofs at about 40% to 70%.
+
 ## How it works
 1. Footer strip and scale bar (bar length in px; its physical length is `--bar-mm`,
    2.00 mm by default); design width in image px = W x printer pixel / scale.
@@ -243,8 +301,11 @@ prints per-channel tracking diagnostics.
 
 Outputs: `channel_results.csv` (one row per channel), `device_summary.csv`
 (one row per image), `summary_by_H_W.csv` (one row per design and print mode,
-low-confidence devices excluded), `class_fractions_vs_W.png`, and one `*_overlay.png` per image
-(tracked walls in class colors, response map, width profile).
+low-confidence devices excluded), `class_fractions_vs_W.png`, and one
+`*_overlay.png` per image (tracked walls in class colors, response map, width
+profile). ML-named frames add `summary_by_H_W_ML.csv` (one row per height,
+print mode, width and roof thickness) and the eleven maps listed under "Maps
+over design width and roof thickness".
 
 `examples/` holds two top views: `example_H5_W50.jpg` (expert-reviewed; three
 open-channel outcomes side by side) and `example_H10_W100_2.jpg`.
@@ -280,7 +341,12 @@ amplifies the grain of an under-exposed side; where the surface grain is as
 dark as a faint contact line, the pocket ends are uncertain and a tongue too
 thin to flood is measured short. A misread scale bar shifts every
 micrometer value of that frame; the lattice does not depend on it when the file
-name carries the channel count. The thresholds were set against one reviewer's
+name carries the channel count. The pitch map suggests that the scale of the
+reviewed images is 3% to 13% off, which would shift every micrometer value and
+every comparison with the design by that much. The narrowing, bulge and quality
+values inherit every error of the wall tracker, so an isolated extreme value
+needs a look at its overlay. Most cells of the reviewed set hold one or two
+replicates (the `replicates` map), so a cell mean there is not a statistic. The thresholds were set against one reviewer's
 calls on 242 frames of one resin, so the agreement figures are not an
 independent accuracy estimate.
 
