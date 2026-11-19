@@ -180,6 +180,8 @@ P = dict(
     lat_min_w_px=0,          # designs at least this wide (printer px) get the lattice fit to pockets and step lines (0 = all designs; 50 = wide designs only, the rule before 2026-11-19)
     leak_jump=0.15,          # a pocket end that moves by more than this fraction of the lumen length between two outline thresholds is in dispute
     leak_gap=0.08,           # the longer pocket of a dispute is a leak when the tracked walls are missing over a run this long (fraction of the lumen length) inside the disputed stretch
+    path_seal_fine=0.012,    # finer sealing of the outline gaps (x design width) for the second flood that follows a narrow tongue (pick_pockets)
+    leak_fill=0.7,           # a flood row filled to less than this fraction of its own extent is seeping through surface grain, not inside a pocket
     pinch_min=0.02,          # the two port pockets count as separated only if they stay this fraction of the lumen length apart
     stub_hw=0.9,             # port stub: half-width of the search window (x design width, or x port width if larger)
     stub_open=0.12,          # port stub: opening kernel (x design width); cracks and edge lines thinner than this are not part of the stub
@@ -1311,14 +1313,17 @@ def pocket_extents(line, arc, tr, xc, h, w_exp, e_top, e_bot):
     (P['extent_taus']); a faint contact line that leaks at the strict threshold usually holds at a
     looser one. Returns one tuple per threshold at which the two floods stay apart, strict first:
     (last row of the top pocket, first row of the bottom pocket, last row of the top pocket's
-    outline, first row of the bottom pocket's outline), or None. pick_pockets() chooses among them."""
+    outline, first row of the bottom pocket's outline, fine), or None. `fine` is the same flood with
+    a finer sealing of the outline gaps (P['path_seal_fine']): its two ends and the rows where each
+    flood is not the clean inside of a pocket, or None if its floods met. pick_pockets() chooses."""
     L = max(1.0, float(e_bot - e_top))
     m_top, m_bot = int(e_top + 0.03 * L), int(e_bot - 0.03 * L)
     cands = []
     for tau in P["extent_taus"]:
         ok, rt, rb, ot, ob = _path_flood(line, arc, tr, xc, h, w_exp, tau, m_top, m_bot)
         if not ok:
-            cands.append((rt, rb, ot, ob))
+            fine = _path_flood(line, arc, tr, xc, h, w_exp, tau, m_top, m_bot, seal=P["path_seal_fine"], sides=True)
+            cands.append((rt, rb, ot, ob, None if fine[0] else (fine[1], fine[2], fine[5])))
     return cands or None
 
 
@@ -1341,7 +1346,17 @@ def pick_pockets(cands, lum, L):
         rr = runs_of(~lum[a:b]) if b > a else []
         return max((q[1] - q[0] for q in rr), default=0)
 
-    for i, (rt, rb, ot, ob) in enumerate(cands):
+    def clean_gain(end, new, unclean, top):
+        # the finer flood reaches farther than `end`; take it when the rows it adds are the clean
+        # inside of a pocket (no long run that touches a corridor side or seeps through grain)
+        a, b = (end, new) if top else (new, end)
+        if unclean is None or b - a <= 0:
+            return end
+        a_, b_ = int(np.clip(a, 0, len(unclean))), int(np.clip(b, 0, len(unclean)))
+        rr = runs_of(unclean[a_:b_]) if b_ > a_ else []
+        return new if max((q[1] - q[0] for q in rr), default=0) <= P["leak_gap"] * L else end
+
+    for i, (rt, rb, ot, ob, fine) in enumerate(cands):
         if rb - rt < P["pinch_min"] * L:
             continue                                    # the floods crossed or touch
         if i + 1 < len(cands):
@@ -1354,14 +1369,26 @@ def pick_pockets(cands, lum, L):
                 continue
         # a pocket often ends in a spike too thin to flood: its outline reaches farther than its
         # interior. Use the outline ends when they lie between the two interiors and stay apart.
-        if ot is not None and ob is not None and rt <= ot < ob <= rb:
-            return float(ot), float(ob)
-        return float(rt), float(rb)
+        t, b = (float(ot), float(ob)) if (ot is not None and ob is not None and rt <= ot < ob <= rb) else (float(rt), float(rb))
+        # A tongue that hangs from a funnel through a narrow neck is cut off by the regular sealing
+        # (R2 H5 W160 ML4-6, channel 3: the funnel ends at 0.25 of the length, its tongue at 0.63).
+        # The finer flood follows it; its extra rows count when they are a clean inside.
+        if fine is not None:
+            t2 = clean_gain(t, float(fine[0]), fine[2][0], True) if fine[0] > t else t
+            b2 = clean_gain(b, float(fine[1]), fine[2][1], False) if fine[1] < b else b
+            if b2 - t2 >= P["pinch_min"] * L:
+                t, b = t2, b2
+        return t, b
     return None
 
 
-def _path_flood(line, arc, tr, xc, h, w_exp, tau, m, m_bot):
-    """Flood of the channel cell from a seed row m (top) and m_bot (bottom); see lumen_path."""
+def _path_flood(line, arc, tr, xc, h, w_exp, tau, m, m_bot, seal=None, sides=False):
+    """Flood of the channel cell from a seed row m (top) and m_bot (bottom); see lumen_path.
+    `seal` is the size of the closing that seals gaps in the outlines (x design width, default
+    P['path_seal']). With `sides`, a sixth value is returned: for the top and for the bottom flood,
+    the rows where it is not the clean inside of a pocket, because it touches a side of the corridor
+    (not enclosed by an outline) or fills less than P['leak_fill'] of its own extent in that row
+    (it seeps through surface grain)."""
     present = tr["present"]
     span = wall_span(tr, present, h)
     pad = max(6.0, P["path_pad"] * w_exp)
@@ -1378,8 +1405,9 @@ def _path_flood(line, arc, tr, xc, h, w_exp, tau, m, m_bot):
     if span is not None and (span[1] - span[0]) >= 0.3 * w_exp:
         xc = 0.5 * (span[0] + span[1])
         seed_half = min(seed_half, 0.25 * (span[1] - span[0]))
+    none = (True, h, 0, None, None) + ((None,) if sides else ())
     if xb - xa < 8 or m_bot - m < 10:
-        return True, h, 0, None, None
+        return none
     B = (np.maximum(line, arc)[:, xa:xb] > tau)
     lab, n = ndi.label(B, structure=np.ones((3, 3)))
     if n:
@@ -1389,21 +1417,21 @@ def _path_flood(line, arc, tr, xc, h, w_exp, tau, m, m_bot):
             if sl is not None and max(sl[0].stop - sl[0].start, sl[1].stop - sl[1].start) >= min_len:
                 keep[i] = True
         B = keep[lab]
-    k = int(max(5, round(P["path_seal"] * w_exp))) | 1
+    k = int(max(5 if seal is None else 3, round((P["path_seal"] if seal is None else seal) * w_exp))) | 1
     B = cv2.morphologyEx(B.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((k, k), np.uint8)) > 0
     free = ~B
     free[:m] = False
     free[m_bot:] = False
     labf, nf = ndi.label(free)                      # 4-connected: a diagonal outline still blocks
     if nf == 0:
-        return False, m, m_bot, None, None
+        return (False, m, m_bot, None, None) + ((None,) if sides else ())
     c0, c1 = int(max(0, xc - xa - seed_half)), int(min(xb - xa, xc - xa + seed_half))
     if c1 - c0 < 2:
         c0, c1 = 0, xb - xa
     top_l = set(np.unique(labf[m:m + 3, c0:c1])) - {0}
     bot_l = set(np.unique(labf[m_bot - 3:m_bot, c0:c1])) - {0}
     if top_l & bot_l:
-        return True, h, 0, None, None
+        return none
     rows_any = lambda labels: np.where(np.isin(labf, list(labels)).any(axis=1))[0] if labels else np.array([], int)
     rt, rb = rows_any(top_l), rows_any(bot_l)
     reach_top = int(rt.max()) if rt.size else m
@@ -1425,7 +1453,17 @@ def _path_flood(line, arc, tr, xc, h, w_exp, tau, m, m_bot):
             return None
         return int(rows.max()) if top else int(rows.min())
 
-    return False, reach_top, reach_bot, outline_end(top_l, True), outline_end(bot_l, False)
+    out = (False, reach_top, reach_bot, outline_end(top_l, True), outline_end(bot_l, False))
+    if sides:
+        def unclean_rows(labels):
+            mm = np.isin(labf, list(labels)) if labels else np.zeros(labf.shape, bool)
+            cnt = mm.sum(axis=1)
+            first = mm.argmax(axis=1)
+            last = mm.shape[1] - 1 - mm[:, ::-1].argmax(axis=1)
+            porous = (cnt > 0) & (cnt < P["leak_fill"] * (last - first + 1))
+            return mm[:, 0] | mm[:, -1] | porous
+        out += ((unclean_rows(top_l), unclean_rows(bot_l)),)
+    return out
 
 
 def find_entrances(N, arc, tracks, h, w, w_exp):
@@ -1930,7 +1968,10 @@ def save_overlay(dev, R, results, walls, faces, info, out_png):
         for xp in (r["xL"], r["xR"]):
             ax.plot(np.where(r["present"], xp, np.nan), ys, color=col, lw=1.4)
             ax.plot(np.where(~r["present"], xp, np.nan), ys, color=col, lw=0.6, alpha=0.35)
-        if r["td_mask"] is not None and r["touchdown"]:
+        # the enclosed-patch mask is drawn where it is the evidence (a bubble or a roof patch inside a
+        # lumen); in a TOUCHDOWN channel with a pinch stretch the pockets are the evidence, and over
+        # surface grain the mask is only speckle (R2 H5 W160 ML4-6, channel 3)
+        if r["td_mask"] is not None and r["touchdown"] and not (r["cls"] == "TOUCHDOWN" and np.isfinite(r["tip_top_row"])):
             yy, xx = np.nonzero(r["td_mask"])
             ax.scatter(xx[::3], yy[::3], s=1, color="yellow", alpha=0.35, linewidths=0)
         # lumen entrances (roof edges): solid where this channel shows the edge, dotted where inherited

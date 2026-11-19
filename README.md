@@ -94,9 +94,15 @@ continue through the disputed stretch; a run without walls longer than 8% of
 the lumen length (`leak_gap`) means that the flood leaked through a faint
 contact line. The pockets also replace a stretch that the tracker left out at
 an entrance when that stretch lies inside a pocket, because it is then the
-flare of the pocket and not a pinch. Where a pocket ends in a spike, the end is the tip of the spike,
-so the x at the middle of the bracket marks the middle of the roof-down
-stretch and not the spike. Reported for
+flare of the pocket and not a pinch. Where a pocket ends in a spike, the end
+is the tip of the spike, so the x at the middle of the bracket marks the middle
+of the roof-down stretch and not the spike. A tongue that hangs from a funnel
+through a narrow neck is cut off when the gaps in the outlines are sealed, so
+the flood is repeated with a finer sealing (`path_seal_fine`). The rows that
+the finer flood adds to a pocket count only when they are the clean inside of
+a pocket: the flood must not touch a side of its search corridor there, and it
+must fill at least 70% of its own extent in each row (`leak_fill`), which a
+flood that seeps through surface grain does not. Reported for
 `PINCHED` and `TOUCHDOWN` channels, as fractions of the lumen length and in
 micrometers:
 
@@ -268,7 +274,11 @@ and the channels can still sit off the lumens (such frames carry low
 confidence). The entrance, pinch and stub
 measurements have not yet been checked against a reviewer; a pocket that ends in a thin
 spike is measured to where the spike becomes too thin to resolve, and a channel
-placed off its lumen gives meaningless distances. A misread scale bar shifts every
+placed off its lumen gives meaningless distances. Every frame is divided by a
+blurred copy of itself before analysis, which removes a brightness gradient but
+amplifies the grain of an under-exposed side; where the surface grain is as
+dark as a faint contact line, the pocket ends are uncertain and a tongue too
+thin to flood is measured short. A misread scale bar shifts every
 micrometer value of that frame; the lattice does not depend on it when the file
 name carries the channel count. The thresholds were set against one reviewer's
 calls on 242 frames of one resin, so the agreement figures are not an
