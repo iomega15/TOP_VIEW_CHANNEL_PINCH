@@ -72,6 +72,15 @@ P = dict(
     design_rows=4,           # printability_device.scad: a channel runs over 4 cells of two posts each -> design length = 4 x 2 x 40 px
     bar_mm=2.0,              # scale-bar length; the "0.20 mm" label on the H5 images is a 10x calibration slip
     um_per_px_default=13.5,  # used only when no scale bar is found (typical for the 1920 px frames)
+    # Scale check against the device length (2026-11-19). The bar is read as bar_mm, but the frames
+    # imaged in October 2026 carry 2.00 mm and 4.00 mm bars, and even read with the right label they
+    # put the device at 1.3-1.4 x its design length (September frames: 0.89-1.12). q = device crop
+    # height x bar scale / design length; outside [scale_q_lo, scale_q_hi] the bar does not describe
+    # the frame and the scale is set so that q = scale_q_ref (the September median).
+    scale_q_lo=0.85,
+    scale_q_hi=1.15,
+    scale_q_ref=0.985,
+    scale_min_crop=0.6,      # ... but only when the device crop spans at least this fraction of the frame height (a short crop is a detection failure, not a ruler)
     # footer / device
     footer_dark=25,
     dev_tex_factor=3.0,
@@ -1833,10 +1842,19 @@ def process_image(path, out_dir, meta=None, save_debug=True):
     else:
         um_per_px = P["um_per_px_default"]
         scale_note = f"scale bar not found ({bar_px} px): default {um_per_px} um/px used"
-    w_exp = (Wd * P["pixel_um"] / um_per_px) if (Wd and np.isfinite(um_per_px)) else 30.0
     rot, (x0, y0, x1, y1), ang = detect_device(gray)
     dev = rot[y0:y1, x0:x1]
     h, w = dev.shape
+    # check the scale against the device length (see P['scale_q_lo'])
+    um_per_px_bar, scale_source = um_per_px, "bar" if not scale_note else "default"
+    len_design_um = P["design_rows"] * 2 * P["design_post_px"] * P["pixel_um"]
+    q_scale = h * um_per_px / len_design_um
+    if not (P["scale_q_lo"] <= q_scale <= P["scale_q_hi"]) and h >= P["scale_min_crop"] * gray.shape[0]:
+        um_per_px = um_per_px * P["scale_q_ref"] / q_scale
+        scale_source = "device length"
+        scale_note = (scale_note + "; " if scale_note else "") + \
+            f"scale bar disagrees with the device length (q {q_scale:.2f}): {um_per_px_bar:.2f} -> {um_per_px:.2f} um/px from the device length"
+    w_exp = (Wd * P["pixel_um"] / um_per_px) if (Wd and np.isfinite(um_per_px)) else 30.0
     N, line, arc, blob, R = dark_maps(dev)
     pitch_exp = (P["wall_mm"] * 1000.0 / um_per_px + w_exp) if np.isfinite(um_per_px) else None
     _, ml_a, ml_b = parse_frame(path)
@@ -1989,6 +2007,7 @@ def process_image(path, out_dir, meta=None, save_debug=True):
         diag["note"] = (diag.get("note", "") + "; " + scale_note).strip("; ")
     info = dict(file=os.path.basename(path), H=Hl, W=Wd, rep=rep, device_h_px=h, device_w_px=w,
                 angle_deg=round(ang, 2), scalebar_px=bar_px, um_per_px=um_per_px, w_exp_px=w_exp,
+                um_per_px_bar=um_per_px_bar, scale_source=scale_source, scale_q=q_scale,
                 w_ref_px=w_ref, pitch_px=pitch, n_channels=len(results), n_walls=len(walls), diag=diag)
     if save_debug:
         save_overlay(dev, R, results, walls, faces, info, os.path.join(out_dir, name + "_overlay.png"))
@@ -2685,6 +2704,8 @@ def main():
               f"n {info['n_channels']:2d} conf {info['diag']['confidence']:6s} -> {summary}")
         base = dict(file=fn, H_layers=info["H"], W_px=info["W"], replicate=info["rep"],
                     scalebar_px=info["scalebar_px"], um_per_px=fmt(info["um_per_px"], 2),
+                    um_per_px_bar=fmt(info["um_per_px_bar"], 2), scale_source=info["scale_source"],
+                    scale_q=fmt(info["scale_q"], 3),
                     w_exp_px=fmt(info["w_exp_px"], 1), w_ref_px=fmt(info["w_ref_px"], 1),
                     device_h_px=info["device_h_px"], device_w_px=info["device_w_px"],
                     pitch_px=fmt(info["pitch_px"], 1), n_walls=info["n_walls"],

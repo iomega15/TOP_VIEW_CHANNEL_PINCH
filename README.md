@@ -238,6 +238,16 @@ thicker roofs at about 40% to 70%.
 ## How it works
 1. Footer strip and scale bar (bar length in px; its physical length is `--bar-mm`,
    2.00 mm by default); design width in image px = W x printer pixel / scale.
+   The scale is then checked against the device itself: the device crop
+   height times the scale, divided by the design channel length (10.24 mm), is
+   0.89 to 1.12 on the frames imaged in September 2026. The frames imaged in
+   October 2026 carry bars labeled 2.00 mm and 4.00 mm, and the ratio there is
+   about 0.7 or 1.3. When the ratio falls outside 0.85 to 1.15 and the crop
+   spans at least 60% of the frame height, the scale is set from the device
+   length so that the ratio becomes 0.985, the September median (`scale_q_lo`,
+   `scale_q_hi`, `scale_q_ref`, `scale_min_crop`). `scale_source` in
+   `channel_results.csv` says which scale a frame used, `um_per_px_bar` keeps
+   the bar's value, and `scale_q` the ratio.
 2. Device detection on a local-texture map; tilt from the device edges; flat field.
 3. Dark-line, dark-arc, and dark-blob response maps (1 = 30% darker than the local mean).
 4. Ports (dark crescents/wedges at the faces), split or merged against the design width.
@@ -350,7 +360,12 @@ thin to flood is measured short. A misread scale bar shifts every
 micrometer value of that frame; the lattice does not depend on it when the file
 name carries the channel count. The pitch map suggests that the scale of the
 reviewed images is 3% to 13% off, which would shift every micrometer value and
-every comparison with the design by that much. The narrowing, bulge and quality
+every comparison with the design by that much. In a frame whose scale was set
+from the device length, the printed length matches the design by construction,
+and the micrometer values hold only if the device printed at its design length;
+read with the label of their own bar, the October frames put the device at 1.3
+to 1.4 times its design length, which the images cannot attribute to the print
+or to the microscope's calibration. The narrowing, bulge and quality
 values inherit every error of the wall tracker, so an isolated extreme value
 needs a look at its overlay. Most cells of the reviewed set hold one or two
 replicates (the `replicates` map), so a cell mean there is not a statistic. The thresholds were set against one reviewer's
