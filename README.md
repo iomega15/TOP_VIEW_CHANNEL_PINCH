@@ -204,9 +204,16 @@ than the reference counts as 0, so that a bulge does not cancel a neck. The
 quality counts both: it is 1 minus the mean of |width / reference - 1| along
 the length, so a lumen that neither narrows nor bulges scores 100% and both a
 neck and a bulge lower the score. In these four maps a cell without an open
-replicate is gray and carries the letter of its class, and a cell in which
-only some replicates are open shows their mean with the count (open / imaged)
-under it.
+replicate is gray and carries the letter of its class. Every other cell shows
+the mean of its open replicates with the count (open / imaged) under it: 1/3
+means that one of three imaged replicates is open and the number is the value
+of that one channel; 3/3, 2/2 and 1/1 mean that every imaged replicate is open.
+The count sits on a red tag when half or fewer of the imaged replicates are
+open (1/3, 1/2), on a yellow tag when two of three are open or when all are
+open but fewer than three replicates were imaged (2/3, 2/2, 1/1), and on a
+green tag (3/3) when all three were imaged and are open. On the
+`open_fraction` map, where the number is the share itself, the red tag does
+not apply.
 
 The last three maps compare the print with the design. The printed width is
 the median width of an open channel, or the width of the lumen parts near the

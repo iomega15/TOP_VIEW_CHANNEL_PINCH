@@ -2295,6 +2295,10 @@ def plot_ml_map(cells, out_png, widths=None):
 
 
 SEQ_BLUE = ["#eef4fc", "#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"]
+FULL_REPLICATES = 3          # replicates per design in the sweep; a cell with fewer imaged ones is flagged on the maps
+COUNT_RED = "#d03b3b"        # tag behind an open / imaged count in which half or fewer of the replicates are open (1/3, 1/2)
+COUNT_YELLOW = "#f5c542"     # tag behind a count with most but not all replicates open (2/3), or all open but fewer than FULL_REPLICATES imaged
+COUNT_GREEN = "#2e9e5b"      # tag behind a count in which all FULL_REPLICATES replicates were imaged and are open
 
 
 def plot_value_map(cells, key, out_png, widths, title, closed_is_gray=True, partial=None, always_count=False,
@@ -2302,19 +2306,26 @@ def plot_value_map(cells, key, out_png, widths, title, closed_is_gray=True, part
     """W x ML map of one measured fraction (cells[key], shown in percent, mean over the replicates
     of a cell) on a one-hue light-to-dark scale; the color saturates at 100. With closed_is_gray, a
     cell with no value is gray and carries the letter of its class. With partial (default: same as
-    closed_is_gray), a cell in which only some replicates are open shows under its number how many
-    (open / imaged); always_count shows that count in every cell. scale, vmax and unit turn the
-    percent map into a count map (scale 1, vmax = the largest count, unit = what is counted)."""
+    closed_is_gray), the number is the mean of the open replicates only, and every cell with a number
+    shows under it how many those are (open / imaged: 3/3, 2/2 or 1/1 when all are open). The count
+    sits on a red tag when half or fewer of the imaged replicates are open (1/3, 1/2), on a yellow
+    tag when more than half but not all are open (2/3) or all are open but fewer than
+    FULL_REPLICATES were imaged (2/2, 1/1), and on a green tag when all FULL_REPLICATES were imaged
+    and are open (3/3). always_count shows the count on a map of another kind, where the
+    number is not a mean of the open replicates: there the red tag does not apply. scale, vmax and
+    unit turn the percent map into a count map (scale 1, vmax = the largest count, unit = what is
+    counted)."""
     partial = closed_is_gray if partial is None else partial
+    tag = lambda bg: dict(boxstyle="round,pad=0.22", facecolor=bg, edgecolor="white", linewidth=0.4)
     from matplotlib.colors import LinearSegmentedColormap
     cmap = LinearSegmentedColormap.from_list("seq_blue", SEQ_BLUE)
     panels = sorted({c["panel"] for c in cells} | set(widths or {}))
     if not panels:
         return
     # fixed margins in inches (title band on top, note band below), so nothing depends on a layout engine
-    fig_h = 3.9 * len(panels) + 1.3
+    fig_h = 3.9 * len(panels) + 1.5
     fig, axes = plt.subplots(len(panels), 1, figsize=(12.6, fig_h), squeeze=False)
-    fig.subplots_adjust(left=0.055, right=0.925, top=1 - 0.75 / fig_h, bottom=0.95 / fig_h, hspace=0.36)
+    fig.subplots_adjust(left=0.055, right=0.925, top=1 - 0.75 / fig_h, bottom=1.15 / fig_h, hspace=0.36)
     fig.text(0.012, 1 - 0.12 / fig_h, title, ha="left", va="top", fontsize=9.5)
     for i_pn, (ax, pn) in enumerate(zip(axes[:, 0], panels)):
         sub = [c for c in cells if c["panel"] == pn]
@@ -2325,23 +2336,34 @@ def plot_value_map(cells, key, out_png, widths, title, closed_is_gray=True, part
         for c in sub:
             x, y = Ws.index(c["W_px"]), c["ML"] - 1
             v = c.get(key, np.nan)
-            sub_txt = ""
+            sub_txt, sub_bg = "", None
             if c["excluded"]:
                 color, txt, ink = "#d9d9d9", "–", "black"
             elif np.isfinite(v):
                 color = cmap(float(np.clip(v / vmax, 0, 1)))
                 txt = f"{scale * v:.0f}"
                 ink = "white" if v / vmax > 0.55 else "#1a1a1a"
-                if always_count or (partial and c.get("n_open", 0) < c.get("n", 0)):
-                    sub_txt = f"{c.get('n_open', 0)}/{c.get('n', 0)}"
+                if always_count or partial:
+                    k_open, n_img = c.get("n_open", 0), c.get("n", 0)
+                    sub_txt = f"{k_open}/{n_img}"
+                    if partial and k_open < n_img and 2 * k_open <= n_img:
+                        sub_bg = COUNT_RED
+                    elif (partial and k_open < n_img) or n_img < FULL_REPLICATES:
+                        sub_bg = COUNT_YELLOW
+                    elif k_open == n_img:
+                        sub_bg = COUNT_GREEN
             elif closed_is_gray:
                 color, txt, ink = "#8c8c8c", CLASS_LETTER[c["cls"]], "white"
             else:
                 color, txt, ink = "#8c8c8c", "?", "white"
             ax.add_patch(plt.Rectangle((x - 0.5, y - 0.5), 1, 1, facecolor=color, edgecolor="white", lw=1.5))
             if sub_txt:
-                ax.text(x, y + 0.14, txt, ha="center", va="center", fontsize=6.5, color=ink)
-                ax.text(x, y - 0.24, sub_txt, ha="center", va="center", fontsize=4.6, color=ink)
+                ax.text(x, y + 0.17, txt, ha="center", va="center", fontsize=6.5, color=ink)
+                if sub_bg:
+                    ax.text(x, y - 0.23, sub_txt, ha="center", va="center", fontsize=4.6,
+                            color="#1a1a1a" if sub_bg == COUNT_YELLOW else "white", bbox=tag(sub_bg))
+                else:
+                    ax.text(x, y - 0.23, sub_txt, ha="center", va="center", fontsize=4.6, color=ink)
             else:
                 ax.text(x, y, txt, ha="center", va="center", fontsize=6.5, color=ink)
         ax.set_xlim(-0.5, len(Ws) - 0.5)
@@ -2363,15 +2385,35 @@ def plot_value_map(cells, key, out_png, widths, title, closed_is_gray=True, part
         cb.set_ticks(list(range(int(round(scale * vmax)) + 1)))
     cb.ax.tick_params(labelsize=7)
     cb.outline.set_visible(False)
+    # the note takes up to three rows: one row runs past the right edge of the figure
     if closed_is_gray:
-        note = ("gray with a letter: no value for this class (P pinched, T touchdown, X not formed)   |   "
-                + ("small k/n under a number: only k of the n imaged replicates are open, the number is their mean   |   " if partial else "")
-                + "– low-confidence device")
+        notes = ["gray with a letter: no value for this class (P pinched, T touchdown, X not formed)   |   – low-confidence device"]
     else:
-        note = "gray ?: no value could be measured   |   – low-confidence device"
-    if unit == "%":
-        note += "   |   number = mean over the replicates of the cell"
-    fig.text(0.012, 0.12 / fig_h, note, ha="left", fontsize=7)
+        notes = ["gray ?: no value could be measured   |   – low-confidence device"]
+    if partial:
+        notes.append("small k/n under a number: k of the n imaged replicates are open end to end; "
+                     "the number is the mean of those k")
+    elif unit == "%":
+        notes.append("number = mean over the replicates of the cell")
+    # row of count tags, each with its meaning: (sample, tag color, meaning, x of the sample)
+    tags = []
+    if partial:
+        tags.append(("1/3", COUNT_RED, "half or fewer of the imaged replicates are open (1/3, 1/2)", 0.016))
+    if partial or always_count:
+        tags.append((f"{FULL_REPLICATES - 1}/{FULL_REPLICATES - 1}", COUNT_YELLOW,
+                     "2/3 open, or all open but fewer than 3 replicates imaged (2/2, 1/1)" if partial
+                     else f"fewer than {FULL_REPLICATES} replicates were imaged", 0.29 if partial else 0.016))
+    if partial or always_count:
+        tags.append((f"{FULL_REPLICATES}/{FULL_REPLICATES}", COUNT_GREEN,
+                     f"all {FULL_REPLICATES} replicates were imaged and are open", 0.63 if partial else 0.30))
+        notes.append("")
+    for sample, bg, meaning, x0 in tags:
+        fig.text(x0, 0.10 / fig_h, sample, ha="left", va="bottom", fontsize=6,
+                 color="#1a1a1a" if bg == COUNT_YELLOW else "white", bbox=tag(bg))
+        fig.text(x0 + 0.02, 0.10 / fig_h, meaning, ha="left", va="bottom", fontsize=7)
+    for i, line in enumerate(reversed(notes)):
+        if line:
+            fig.text(0.012, (0.10 + 0.18 * i) / fig_h, line, ha="left", va="bottom", fontsize=7)
     fig.savefig(out_png, dpi=150)
     plt.close(fig)
 
@@ -2473,7 +2515,7 @@ def summarize(rows, out_dir):
         plot_value_map(cells, "n_rep", os.path.join(out_dir, "replicates_map_W_ML.png"), widths,
                        "Replicates per design: number of imaged channels that count for a cell (one per physical "
                        "channel; channels of low-confidence devices are not counted)", closed_is_gray=False,
-                       scale=1.0, vmax=3.0, unit="replicates")
+                       scale=1.0, vmax=float(FULL_REPLICATES), unit="replicates")
         plot_value_map(cells, "w_ratio", os.path.join(out_dir, "width_printed_vs_design_map_W_ML.png"), widths,
                        "Printed lumen width as % of the design width (open channels: median width along the length; "
                        "pinched channels: width of the lumen parts near the ports)", partial=False)
